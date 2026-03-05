@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "try-project"
+version = "1.0.0"
+description = "Privacy-Preserving Federated Learning over Noisy Links"
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]>=1.22.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "tensorflow-cpu>=2.16.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.5.0",
+    "protobuf>=4.25.0",
+    "scipy>=1.13.0",
+    "matplotlib>=3.9.0",
+    "tqdm>=4.66.0",
+    "rich>=13.7.0",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "israelbarnabas"
+
+[tool.flwr.app.components]
+serverapp = "try_project.server_app:app"
+clientapp = "try_project.client_app:app"
+
+[tool.flwr.app.config]
+num-rounds = 10
+local-epochs = 3
+batch-size = 32
+fraction-train = 1.0
+fraction-evaluate = 0.5
+non-iid = true
+alpha = 0.5
+num-clients = 30
+window-size = 100
+step = 50
+use-noisy-channel = false
+p-gb = 0.05
+p-bg = 0.95
+loss-good = 0.01
+loss-bad = 0.25
+base-latency-ms = 50.0
+simulation-seed = 42
+model-size-bytes = 1200000
+
+[tool.flwr.federations]
+default = "reliable-baseline"
+
+[tool.flwr.federations.reliable-baseline]
+options.num-supernodes = 30
+
+[tool.flwr.federations.reliable-baseline.config]
+use-noisy-channel = false
+num-rounds = 10
+
+[tool.flwr.federations.noisy-light]
+options.num-supernodes = 30
+
+[tool.flwr.federations.noisy-light.config]
+use-noisy-channel = false
+loss-bad = 0.15
+num-rounds = 10
+
+[tool.flwr.federations.noisy-medium]
+options.num-supernodes = 30
+
+[tool.flwr.federations.noisy-medium.config]
+use-noisy-channel = false
+loss-bad = 0.25
+num-rounds = 10
+
+[tool.flwr.federations.noisy-heavy]
+options.num-supernodes = 30
+
+[tool.flwr.federations.noisy-heavy.config]
+use-noisy-channel = false
+p-gb = 0.15
+p-bg = 0.85
+loss-bad = 0.35
+num-rounds = 10

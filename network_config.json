@@ -1,0 +1,7 @@
+{
+  "experiment-id": "network_moderate",
+  "num-server-rounds": 10,
+  "use-ns3": true,
+  "loss-bad": 0.25,
+  "latency-ms": 50
+}
