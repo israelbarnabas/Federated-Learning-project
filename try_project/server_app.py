@@ -42,7 +42,13 @@ def server_fn(context: Context) -> ServerAppComponents:
     if not isinstance(num_rounds, int) or num_rounds < 1:
         num_rounds = 10
     
+    # Check DP status
+    use_dp = cfg.get("use-dp") or cfg.get("use_dp", False)
+    target_epsilon = cfg.get("target-epsilon") or cfg.get("target_epsilon", 5.0)
+    
     print(f"[Server] Starting with {num_rounds} rounds")
+    if use_dp:
+        print(f"[Server] DP-SGD enabled, target ε = {target_epsilon}")
     
     # Create initial parameters
     from try_project.task import load_model
