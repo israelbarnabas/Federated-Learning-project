@@ -1,32 +1,16 @@
 """
-Differential Privacy utilities for Federated Learning.
-Implements DP-SGD with moments accountant for privacy budget tracking.
+Standalone Differential Privacy utilities for Federated Learning.
+Pure TensorFlow implementation - no tensorflow-privacy dependency.
+Implements DP-SGD with manual privacy accounting.
 """
 
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, Optional, Dict, Any
-import warnings
-
-# Try to import tensorflow-privacy, provide fallback if unavailable
-try:
-    from tensorflow_privacy.privacy.optimizers.dp_optimizer_keras import (
-        DPKerasSGDOptimizer,
-        DPKerasAdamOptimizer,
-    )
-    from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy_lib
-    TF_PRIVACY_AVAILABLE = True
-except ImportError:
-    TF_PRIVACY_AVAILABLE = False
-    warnings.warn("tensorflow-privacy not installed. DP features will be unavailable.")
+from typing import Tuple, Optional, Dict, Any, List
+import math
 
 
-def check_dp_available() -> bool:
-    """Check if tensorflow-privacy is available."""
-    return TF_PRIVACY_AVAILABLE
-
-
-def compute_epsilon(
+def compute_epsilon_simple(
     num_samples: int,
     batch_size: int,
     noise_multiplier: float,
@@ -34,43 +18,49 @@ def compute_epsilon(
     delta: float = 1e-4,
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Compute privacy budget (epsilon) using moments accountant.
+    Compute privacy budget using simplified moments accountant.
     
-    Args:
-        num_samples: Total number of samples in dataset
-        batch_size: Training batch size
-        noise_multiplier: Noise multiplier (sigma)
-        epochs: Number of training epochs
-        delta: Privacy parameter (target failure probability)
-    
-    Returns:
-        Tuple of (epsilon, details_dict)
+    CORRECTED: Higher noise = lower epsilon (better privacy)
     """
-    if not TF_PRIVACY_AVAILABLE:
-        raise RuntimeError("tensorflow-privacy required for epsilon computation")
-    
     if noise_multiplier <= 0:
         return float('inf'), {"error": "Noise multiplier must be positive"}
     
-    # Compute using TensorFlow Privacy's library
-    eps = compute_dp_sgd_privacy_lib.compute_dp_sgd_privacy(
-        n=num_samples,
-        batch_size=batch_size,
-        noise_multiplier=noise_multiplier,
-        epochs=epochs,
-        delta=delta,
-    )
+    # Compute key parameters
+    steps_per_epoch = max(1, num_samples // batch_size)
+    total_steps = steps_per_epoch * epochs
+    sampling_rate = batch_size / num_samples
+    
+    # Standard deviation of Gaussian noise
+    sigma = noise_multiplier
+    
+    # Simplified privacy accounting: use the standard Gaussian mechanism composition
+    # For sampled Gaussian mechanism: epsilon ≈ sqrt(2 * log(1.25/δ)) * (1/σ) * sqrt(T) * q
+    # where q = sampling_rate, T = total_steps
+    
+    # This is a simplified but directionally correct formula
+    # Higher sigma (more noise) → lower epsilon (better privacy)
+    log_term = math.sqrt(2 * math.log(1.25 / delta))
+    composition_factor = math.sqrt(total_steps) * sampling_rate
+    
+    epsilon = log_term * composition_factor / sigma
     
     details = {
         "num_samples": num_samples,
         "batch_size": batch_size,
+        "steps_per_epoch": steps_per_epoch,
+        "total_steps": total_steps,
+        "sampling_rate": sampling_rate,
         "noise_multiplier": noise_multiplier,
+        "sigma": sigma,
         "epochs": epochs,
         "delta": delta,
-        "epsilon": float(eps[0]) if isinstance(eps, tuple) else float(eps),
+        "log_term": log_term,
+        "composition_factor": composition_factor,
+        "epsilon": epsilon,
+        "method": "simplified_gaussian_composition",
     }
     
-    return details["epsilon"], details
+    return epsilon, details
 
 
 def find_noise_multiplier_for_epsilon(
@@ -79,44 +69,75 @@ def find_noise_multiplier_for_epsilon(
     batch_size: int,
     epochs: int,
     delta: float = 1e-4,
-    tolerance: float = 0.1,
-    max_iterations: int = 50,
+    tolerance: float = 0.5,
+    max_iterations: int = 100,
 ) -> Tuple[float, float]:
     """
-    Binary search to find noise multiplier for target epsilon.
+    Find noise multiplier for target epsilon.
+    CORRECTED: Direct computation instead of binary search.
+    """
+    # For target epsilon, we need: sigma = (log_term * composition_factor) / epsilon
+    # So higher target epsilon → lower sigma (less noise needed)
+    
+    # Get the constant factor by computing with sigma=1
+    eps_at_1, details = compute_epsilon_simple(num_samples, batch_size, 1.0, epochs, delta)
+    log_term = details["log_term"]
+    composition_factor = details["composition_factor"]
+    
+    # Direct computation: sigma = (log_term * composition_factor) / target_epsilon
+    optimal_sigma = (log_term * composition_factor) / target_epsilon
+    
+    # Verify
+    achieved_eps, _ = compute_epsilon_simple(num_samples, batch_size, optimal_sigma, epochs, delta)
+    
+    return optimal_sigma, achieved_eps
+
+
+def apply_dp_to_gradients(
+    grads: List[tf.Tensor],
+    noise_multiplier: float,
+    l2_norm_clip: float,
+) -> List[tf.Tensor]:
+    """
+    Apply differential privacy to gradients: clip then add noise.
     
     Args:
-        target_epsilon: Desired privacy budget
-        num_samples, batch_size, epochs, delta: DP parameters
-        tolerance: Acceptable epsilon difference
-        max_iterations: Search iterations
+        grads: List of gradient tensors
+        noise_multiplier: Sigma for Gaussian noise
+        l2_norm_clip: Maximum L2 norm for gradients
     
     Returns:
-        Tuple of (noise_multiplier, achieved_epsilon)
+        List of DP-processed gradients
     """
-    if not TF_PRIVACY_AVAILABLE:
-        raise RuntimeError("tensorflow-privacy required")
+    if noise_multiplier <= 0:
+        # Just clip, no noise
+        global_norm = tf.linalg.global_norm(grads)
+        clip_factor = tf.minimum(l2_norm_clip / (global_norm + 1e-10), 1.0)
+        return [g * clip_factor for g in grads]
     
-    # Binary search bounds
-    low, high = 0.1, 100.0
+    # Compute global L2 norm
+    global_norm = tf.linalg.global_norm(grads)
     
-    for i in range(max_iterations):
-        mid = (low + high) / 2
-        eps, _ = compute_epsilon(num_samples, batch_size, mid, epochs, delta)
-        
-        if abs(eps - target_epsilon) < tolerance:
-            return mid, eps
-        
-        if eps > target_epsilon:
-            # Need more noise
-            low = mid
+    # Clip gradients
+    clip_factor = tf.minimum(l2_norm_clip / (global_norm + 1e-10), 1.0)
+    clipped_grads = [g * clip_factor for g in grads]
+    
+    # Add Gaussian noise
+    noise_stddev = l2_norm_clip * noise_multiplier
+    noisy_grads = []
+    for g in clipped_grads:
+        if g is not None:
+            noise = tf.random.normal(
+                shape=tf.shape(g),
+                mean=0.0,
+                stddev=noise_stddev,
+                dtype=g.dtype
+            )
+            noisy_grads.append(g + noise)
         else:
-            # Need less noise
-            high = mid
+            noisy_grads.append(None)
     
-    # Return best found
-    final_eps, _ = compute_epsilon(num_samples, batch_size, mid, epochs, delta)
-    return mid, final_eps
+    return noisy_grads
 
 
 def create_dp_optimizer(
@@ -127,55 +148,28 @@ def create_dp_optimizer(
     optimizer_type: str = "sgd",
 ) -> tf.keras.optimizers.Optimizer:
     """
-    Create a differentially private optimizer.
+    Create optimizer for DP-SGD.
     
-    Args:
-        noise_multiplier: Noise multiplier (sigma) for DP
-        l2_norm_clip: Gradient clipping bound (C)
-        num_microbatches: Number of microbatches for gradient computation
-        learning_rate: Learning rate
-        optimizer_type: "sgd" or "adam"
-    
-    Returns:
-        DP-wrapped optimizer
+    NOTE: Gradient clipping and noise are applied in the training loop
+    via apply_dp_to_gradients(), not in the optimizer itself.
+    This ensures compatibility with Keras 3.x / TF 2.16.
     """
-    if not TF_PRIVACY_AVAILABLE:
-        raise RuntimeError("tensorflow-privacy required for DP optimizer")
-    
-    if noise_multiplier <= 0:
-        raise ValueError("Noise multiplier must be positive for DP")
-    
-    if optimizer_type.lower() == "sgd":
-        optimizer = DPKerasSGDOptimizer(
-            l2_norm_clip=l2_norm_clip,
-            noise_multiplier=noise_multiplier,
-            num_microbatches=num_microbatches,
-            learning_rate=learning_rate,
-        )
-    elif optimizer_type.lower() == "adam":
-        optimizer = DPKerasAdamOptimizer(
-            l2_norm_clip=l2_norm_clip,
-            noise_multiplier=noise_multiplier,
-            num_microbatches=num_microbatches,
-            learning_rate=learning_rate,
-        )
-    else:
-        raise ValueError(f"Unknown optimizer type: {optimizer_type}")
-    
-    return optimizer
+    # Always return standard optimizer - DP operations done in training loop
+    if optimizer_type.lower() == "adam":
+        return tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    return tf.keras.optimizers.SGD(learning_rate=learning_rate)
 
 
 class PrivacyAccountant:
     """
     Track privacy budget consumption across FL rounds.
-    Implements simple composition for now (can upgrade to advanced composition).
     """
     
     def __init__(self, target_epsilon: float, target_delta: float, num_samples: int):
         self.target_epsilon = target_epsilon
         self.target_delta = target_delta
         self.num_samples = num_samples
-        self.rounds_consumed: list[Dict] = []
+        self.rounds_consumed: List[Dict] = []
         self.total_epsilon_spent = 0.0
     
     def spend_budget(self, epsilon_round: float, round_num: int):
@@ -204,3 +198,12 @@ class PrivacyAccountant:
             "budget_exhausted": self.is_budget_exhausted(),
             "rounds_accounted": len(self.rounds_consumed),
         }
+
+
+def check_dp_available() -> bool:
+    """Always returns True since we use pure TF implementation."""
+    return True
+
+
+# Aliases for compatibility
+compute_epsilon = compute_epsilon_simple

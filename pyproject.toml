@@ -20,7 +20,6 @@ dependencies = [
     "tqdm>=4.66.0",
     "rich>=13.7.0",
     "python-dotenv>=1.0.1",
-    "tensorflow-privacy>=0.15.0",  # ADDED for DP-SGD
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -33,6 +32,7 @@ publisher = "israelbarnabas"
 serverapp = "try_project.server_app:app"
 clientapp = "try_project.client_app:app"
 
+# DEFAULT config (used when no federation specified)
 [tool.flwr.app.config]
 num-rounds = 10
 local-epochs = 3
@@ -44,52 +44,47 @@ alpha = 0.5
 num-clients = 30
 window-size = 100
 step = 50
-use-noisy-channel = false
+use-noisy-channel = true
 p-gb = 0.05
 p-bg = 0.95
 loss-good = 0.01
-loss-bad = 0.25
+loss-bad = 0.35
 base-latency-ms = 50.0
 simulation-seed = 42
 model-size-bytes = 1200000
-
-# DP-SGD Configuration
-use-dp = false
+use-dp = true
 l2-norm-clip = 1.0
 noise-multiplier = 0.0
 num-microbatches = 1
-target-epsilon = 5.0
+target-epsilon = 10.0
 target-delta = 0.0001
 
+# FEDERATION-SPECIFIC configs (override defaults)
 [tool.flwr.federations]
-default = "reliable-baseline"
+default = "noisy-heavy"
 
 [tool.flwr.federations.reliable-baseline]
 options.num-supernodes = 30
 
 [tool.flwr.federations.reliable-baseline.config]
 use-noisy-channel = false
+use-dp = true
 num-rounds = 10
 
 [tool.flwr.federations.noisy-light]
 options.num-supernodes = 30
 
 [tool.flwr.federations.noisy-light.config]
-use-noisy-channel = true  # FIXED: was false
-p-gb = 0.05
-p-bg = 0.95
-loss-good = 0.01
+use-noisy-channel = true
 loss-bad = 0.15
 num-rounds = 10
+
 
 [tool.flwr.federations.noisy-medium]
 options.num-supernodes = 30
 
 [tool.flwr.federations.noisy-medium.config]
-use-noisy-channel = true  # FIXED: was false
-p-gb = 0.05
-p-bg = 0.95
-loss-good = 0.01
+use-noisy-channel = true
 loss-bad = 0.25
 num-rounds = 10
 
@@ -97,20 +92,18 @@ num-rounds = 10
 options.num-supernodes = 30
 
 [tool.flwr.federations.noisy-heavy.config]
-use-noisy-channel = true  # FIXED: was false
-p-gb = 0.15
-p-bg = 0.85
-loss-good = 0.01
+use-noisy-channel = true
 loss-bad = 0.35
 num-rounds = 10
 
-# DP-enabled federation for testing
-[tool.flwr.federations.dp-baseline]
+
+[tool.flwr.federations.dp-test]
 options.num-supernodes = 30
 
-[tool.flwr.federations.dp-baseline.config]
-use-noisy-channel = false
+[tool.flwr.federations.dp-test.config]
+use-noisy-channel = true
 use-dp = true
-noise-multiplier = 1.0
 target-epsilon = 3.0
 num-rounds = 10
+local-epochs = 3
+batch-size = 32
