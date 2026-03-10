@@ -34,7 +34,7 @@ clientapp = "try_project.client_app:app"
 
 # DEFAULT config (used when no federation specified)
 [tool.flwr.app.config]
-num-rounds = 30
+num-rounds = 3
 local-epochs = 3
 batch-size = 32
 fraction-train = 1.0
@@ -58,6 +58,22 @@ noise-multiplier = 0.0
 num-microbatches = 1
 target-epsilon = 5.0
 target-delta = 0.0001
+data-seed = 42
+# DP settings (IMPROVED defaults for accuracy)
+use-dp = false
+target-epsilon = 5.0
+target-delta = 0.0001
+l2-norm-clip = 0.5        # REDUCED from 1.0 for better accuracy
+noise-multiplier = 0.0
+num-microbatches = 1
+
+# FedProx settings
+use-fedprox = false
+fedprox-mu = 0.1
+
+# Secure Aggregation settings
+use-sa = false
+sa-threshold = 20
 
 # FEDERATION-SPECIFIC configs (override defaults)
 [tool.flwr.federations]
@@ -107,3 +123,24 @@ target-epsilon = 3.0
 num-rounds = 10
 local-epochs = 3
 batch-size = 32
+
+[tool.flwr.federations.dp-sa-heavy]
+options.num-supernodes = 30
+
+[tool.flwr.federations.dp-sa-heavy.config]
+use-noisy-channel = true
+use-dp = true
+use-sa = true
+target-epsilon = 5.0
+loss-bad = 0.35
+num-rounds = 10
+l2-norm-clip = 0.5
+fedprox-mu = 0.1
+
+[tool.flwr.federations.fedprox-baseline]
+options.num-supernodes = 30
+
+[tool.flwr.federations.fedprox-baseline.config]
+use-fedprox = true
+fedprox-mu = 0.1
+num-rounds = 10
