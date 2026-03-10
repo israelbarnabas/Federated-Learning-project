@@ -1,20 +1,24 @@
 """
-Network wrapper with Secure Aggregation toggle and comprehensive metrics.
+Network wrapper with CORRECT Secure Aggregation flow.
+Server aggregates masked weights; never sees individual unmasked updates.
 """
 
 from typing import Dict, Any, List, Tuple, Optional
 from flwr.common import FitRes, Parameters, ndarrays_to_parameters, parameters_to_ndarrays
 from flwr.server.client_proxy import ClientProxy
 import numpy as np
-import time
 
 from try_project.simple_network_sim import SimpleGilbertElliott
-from try_project.secure_agg import SecureAggregation
+from try_project.secure_agg import SecureAggregation, ProperSecureAggregation
 
 
 class PassiveNetworkWrapper:
     """
-    Passive network wrapper that injects channel effects and manages Secure Aggregation.
+    Passive network wrapper with proper SA:
+    1. Clients mask weights before transmission
+    2. Network may drop some masked updates
+    3. Server aggregates surviving masked weights
+    4. Masks cancel out in aggregation (server never unmasks individually)
     """
     
     def __init__(
@@ -24,6 +28,7 @@ class PassiveNetworkWrapper:
         model_bytes: int = 1_200_000,
         use_sa: bool = False,
         sa_threshold: int = 20,
+        use_pairwise_sa: bool = False,  # Use full pairwise masking
     ):
         self.base = base_strategy
         self.channel = channel
@@ -31,49 +36,61 @@ class PassiveNetworkWrapper:
         self.use_sa = use_sa
         self.sa_threshold = sa_threshold
         
-        # Initialize SA if enabled
+        # Initialize SA
         self.sa = None
         if use_sa:
-            # Estimate max clients from strategy
-            self.sa = SecureAggregation(num_clients=30, threshold=sa_threshold)
-            print(f"[NET] Secure Aggregation ENABLED (threshold={sa_threshold})")
+            if use_pairwise_sa:
+                self.sa = ProperSecureAggregation(num_clients=30, threshold=sa_threshold)
+                print(f"[NET] Proper SA (pairwise) ENABLED, threshold={sa_threshold}")
+            else:
+                self.sa = SecureAggregation(num_clients=30, threshold=sa_threshold)
+                print(f"[NET] Simplified SA ENABLED, threshold={sa_threshold}")
         
-        # Metrics tracking
+        # Metrics
         self.round_metrics: List[Dict] = []
         self.total_bytes_sent = 0
         self.total_bytes_lost = 0
-        self.total_rounds = 0
         
     def __getattr__(self, name):
-        """Delegate unknown attributes to base strategy."""
         return getattr(self.base, name)
     
     def initialize_parameters(self, client_manager):
-        """Delegate to base strategy."""
         return self.base.initialize_parameters(client_manager)
     
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
-        """Configure fit with optional SA setup."""
+        """Configure fit with SA parameters."""
         config_pairs = self.base.configure_fit(server_round, parameters, client_manager)
         
-        # Add SA configuration to client configs if enabled
         if self.use_sa and self.sa:
-            # Generate round seed for SA
             round_seed = self.sa.generate_round_seed(server_round)
             
-            # Add SA config to each client's instructions
+            # Get all participating client IDs
+            all_client_ids = []
+            for client, _ in config_pairs:
+                try:
+                    all_client_ids.append(int(client.cid))
+                except:
+                    all_client_ids.append(0)
+            
             updated_pairs = []
             for client, config in config_pairs:
+                try:
+                    cid = int(client.cid)
+                except:
+                    cid = 0
+                
                 config["sa_enabled"] = True
                 config["sa_round_seed"] = round_seed
                 config["sa_threshold"] = self.sa_threshold
+                config["sa_all_clients"] = all_client_ids  # For pairwise masking
+                
                 updated_pairs.append((client, config))
+            
             return updated_pairs
         
         return config_pairs
     
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager):
-        """Delegate to base strategy."""
         return self.base.configure_evaluate(server_round, parameters, client_manager)
     
     def aggregate_fit(
@@ -83,42 +100,45 @@ class PassiveNetworkWrapper:
         failures: List[BaseException]
     ):
         """
-        Aggregate fit results with network effects and optional SA.
+        Aggregate with proper SA flow:
+        1. Apply SA masking (client-side simulation)
+        2. Apply network effects (drops)
+        3. Aggregate masked weights (masks cancel)
+        4. Server never sees individual unmasked updates
         """
         pre_success = len(results)
-        self.total_rounds = server_round
         
-        # Phase 1: Apply SA masking if enabled
+        # Phase 1: Apply SA masking (simulating client-side behavior)
         if self.use_sa and self.sa:
             results = self._apply_sa_masking(results, server_round)
         
-        # Phase 2: Apply network effects (loss, latency)
+        # Phase 2: Apply network effects
         network_results, network_failures, round_bytes = self._apply_network_effects(
             results, failures, server_round
         )
         
-        # Update byte counters
         self.total_bytes_sent += round_bytes["sent"]
         self.total_bytes_lost += round_bytes["lost_equivalent"]
         
         post_success = len(network_results)
         
-        # Phase 3: SA unmasking if enabled
-        if self.use_sa and self.sa:
+        # Phase 3: Check SA threshold
+        if self.use_sa:
             if post_success < self.sa_threshold:
-                print(f"[NET] R{server_round}: INSUFFICIENT clients for SA "
-                      f"({post_success}/{self.sa_threshold}), aborting aggregation")
+                print(f"[NET] R{server_round}: INSUFFICIENT for SA "
+                      f"({post_success}/{self.sa_threshold}), aborting")
                 # Return previous parameters (no update)
                 return None, {}
             
-            # Unmask the aggregated results
-            network_results = self._apply_sa_unmasking(network_results, server_round)
-            print(f"[NET] R{server_round}: SA unmasking with {post_success} clients")
+            # Aggregate masked weights (masks cancel in sum)
+            network_results = self._aggregate_masked_weights(network_results, server_round)
+            print(f"[NET] R{server_round}: SA aggregation with {post_success} clients "
+                  f"(masks cancel in sum)")
         
         # Log metrics
         self._log_round_metrics(server_round, pre_success, post_success, round_bytes)
         
-        # Delegate to base strategy for actual aggregation
+        # Delegate to base strategy
         return self.base.aggregate_fit(server_round, network_results, network_failures)
     
     def _apply_sa_masking(
@@ -126,32 +146,46 @@ class PassiveNetworkWrapper:
         results: List[Tuple[ClientProxy, FitRes]], 
         server_round: int
     ) -> List[Tuple[ClientProxy, FitRes]]:
-        """Apply SA masking to client weights before transmission."""
-        masked_results = []
+        """
+        Simulate client-side SA masking.
+        
+        In real deployment, clients do this. We simulate it here
+        to measure the network impact (masked weights are same size).
+        """
         round_seed = self.sa.generate_round_seed(server_round)
+        masked_results = []
         
         for client, fit_res in results:
             try:
                 cid = int(client.cid)
-                # Get weights from FitRes
                 weights = parameters_to_ndarrays(fit_res.parameters)
                 
-                # Generate and apply masks
-                masks = self.sa.generate_masks(cid, round_seed, weights)
+                # Get shapes for mask generation
+                weight_shapes = [w.shape for w in weights]
+                
+                # Check if we have pairwise or simple masking
+                all_clients = getattr(fit_res, 'sa_all_clients', None)
+                
+                if all_clients and isinstance(self.sa, ProperSecureAggregation):
+                    masks = self.sa.generate_pairwise_masks(cid, round_seed, weight_shapes, all_clients)
+                else:
+                    masks = self.sa.generate_masks(cid, round_seed, weight_shapes)
+                
                 masked_weights = self.sa.mask_weights(weights, masks)
                 
-                # Create new FitRes with masked weights
+                # Update FitRes with masked weights
                 fit_res.parameters = ndarrays_to_parameters(masked_weights)
                 
-                # Store masks for later unmasking (server-side tracking)
+                # Store metadata for aggregation (not for unmasking)
                 fit_res.metrics = fit_res.metrics or {}
-                fit_res.metrics["_sa_masks"] = masks  # Internal use only
+                fit_res.metrics["_sa_mask_applied"] = True
+                fit_res.metrics["_sa_client_id"] = cid
                 
                 masked_results.append((client, fit_res))
                 
             except Exception as e:
                 print(f"[SA] Masking failed for client {client.cid}: {e}")
-                # Include unmasked (will fail at unmasking if too many)
+                # Include unmasked (will corrupt aggregation if too many)
                 masked_results.append((client, fit_res))
         
         return masked_results
@@ -171,7 +205,7 @@ class PassiveNetworkWrapper:
         for client, fit_res in results:
             try:
                 cid = int(client.cid)
-            except (ValueError, AttributeError):
+            except:
                 cid = 0
             
             # Simulate transmission
@@ -180,28 +214,20 @@ class PassiveNetworkWrapper:
                     cid, self.model_bytes
                 )
             else:
-                # Reliable channel
                 success = True
                 net_metrics = {
-                    "loss_rate": 0.0,
-                    "latency_ms": 50.0,
-                    "state": "good",
-                    "bandwidth_mbps": 10.0,
-                    "transmit_time_s": 1.0,
-                    "retrans_factor": 1.0,
+                    "loss_rate": 0.0, "latency_ms": 50.0, "state": "good",
+                    "bandwidth_mbps": 10.0, "transmit_time_s": 1.0, "retrans_factor": 1.0,
                 }
             
             if success:
-                # Calculate actual bytes transmitted (including retransmissions)
+                # SA doubles the effective size (masks + masked weights)
                 bytes_transmitted = self.model_bytes * net_metrics.get("retrans_factor", 1.0)
-                
-                # SA doubles the upload (masks + masked weights)
                 if self.use_sa:
-                    bytes_transmitted *= 2.0
+                    bytes_transmitted *= 2.0  # Mask overhead
                 
                 round_bytes_sent += bytes_transmitted
                 
-                # Add network metrics to fit_res
                 fit_res.metrics = fit_res.metrics or {}
                 fit_res.metrics.update({
                     "net_loss_rate": float(net_metrics["loss_rate"]),
@@ -214,8 +240,7 @@ class PassiveNetworkWrapper:
                 
                 network_results.append((client, fit_res))
             else:
-                # Lost update
-                lost_bytes = self.model_bytes * 1.5  # Assumed retrans attempt
+                lost_bytes = self.model_bytes * 1.5
                 if self.use_sa:
                     lost_bytes *= 2.0
                 round_bytes_lost += lost_bytes
@@ -229,102 +254,95 @@ class PassiveNetworkWrapper:
             "lost_equivalent": round_bytes_lost,
         }
     
-    def _apply_sa_unmasking(
+    def _aggregate_masked_weights(
         self,
         results: List[Tuple[ClientProxy, FitRes]],
         server_round: int,
     ) -> List[Tuple[ClientProxy, FitRes]]:
-        """Remove SA masks from aggregated results."""
-        round_seed = self.sa.generate_round_seed(server_round)
-        client_ids = []
-        all_masked_weights = []
+        """
+        Aggregate masked weights where masks cancel out.
         
-        # Collect weights and client IDs
+        CORRECT SA FLOW: Server sums masked weights; masks cancel in aggregation.
+        Server NEVER sees individual unmasked updates.
+        """
+        if not results:
+            return results
+        
+        round_seed = self.sa.generate_round_seed(server_round)
+        
+        # Extract masked weights and client IDs
+        masked_weights_list = []
+        client_ids = []
+        
         for client, fit_res in results:
             try:
                 cid = int(client.cid)
                 weights = parameters_to_ndarrays(fit_res.parameters)
-                all_masked_weights.append(weights)
+                masked_weights_list.append(weights)
                 client_ids.append(cid)
             except Exception as e:
-                print(f"[SA] Unmasking prep failed for {client.cid}: {e}")
+                print(f"[SA] Extraction failed for {client.cid}: {e}")
         
-        if not all_masked_weights:
+        if not masked_weights_list:
             return results
         
-        # Sum all masked weights (server-side aggregation)
-        aggregated_masked = [np.sum(w, axis=0) for w in zip(*all_masked_weights)]
+        # CRITICAL: Aggregate masked weights
+        # In simplified SA, we assume masks cancel in sum
+        # In proper SA, we use pairwise masking to ensure exact cancellation
         
-        # Subtract masks from surviving clients
-        for cid in client_ids:
-            masks = self.sa.generate_masks(cid, round_seed, aggregated_masked)
-            aggregated_masked = [agg - mask for agg, mask in zip(aggregated_masked, masks)]
-        
-        # Average
-        aggregated = [w / len(client_ids) for w in aggregated_masked]
-        
-        # Create dummy FitRes with unmasked weights (attach to first result)
-        if results:
+        try:
+            aggregated = self.sa.aggregate_masked(
+                masked_weights_list, client_ids, round_seed
+            )
+            
+            # Create single result with aggregated weights
             first_client, first_fit_res = results[0]
             first_fit_res.parameters = ndarrays_to_parameters(aggregated)
-            # Clear internal metrics
-            if first_fit_res.metrics and "_sa_masks" in first_fit_res.metrics:
-                del first_fit_res.metrics["_sa_masks"]
             
-            # Return only the aggregated result (others are redundant)
+            # Clean up metadata
+            if first_fit_res.metrics:
+                for key in list(first_fit_res.metrics.keys()):
+                    if key.startswith("_sa_"):
+                        del first_fit_res.metrics[key]
+            
+            # Return only aggregated result (others redundant)
             return [(first_client, first_fit_res)]
-        
-        return results
+            
+        except Exception as e:
+            print(f"[SA] Aggregation failed: {e}")
+            # Fallback: return unaggregated (will likely fail downstream)
+            return results
     
-    def _log_round_metrics(
-        self, 
-        server_round: int, 
-        pre_success: int, 
-        post_success: int,
-        round_bytes: Dict[str, float],
-    ):
+    def _log_round_metrics(self, server_round: int, pre: int, post: int, bytes_dict: Dict):
         """Log round metrics."""
-        avg_transmit_time = 0.0
-        if network_results := getattr(self, '_last_network_results', None):
-            times = [r.metrics.get("net_transmit_time_s", 0) 
-                    for _, r in network_results if r.metrics]
-            if times:
-                avg_transmit_time = sum(times) / len(times)
-        
         self.round_metrics.append({
             "round": server_round,
-            "pre_network_success": pre_success,
-            "post_network_success": post_success,
-            "network_failures": pre_success - post_success,
-            "bytes_sent_mb": round_bytes["sent"] / 1e6,
-            "bytes_lost_mb": round_bytes["lost_equivalent"] / 1e6,
-            "avg_transmit_time_s": avg_transmit_time,
+            "pre_network": pre,
+            "post_network": post,
+            "dropped": pre - post,
+            "bytes_sent_mb": bytes_dict["sent"] / 1e6,
+            "bytes_lost_mb": bytes_dict["lost_equivalent"] / 1e6,
             "sa_enabled": self.use_sa,
         })
         
-        print(f"[NET] R{server_round}: {post_success}/{pre_success} successful, "
-              f"{round_bytes['sent']/1e6:.2f}MB sent, "
+        print(f"[NET] R{server_round}: {post}/{pre} successful, "
+              f"{bytes_dict['sent']/1e6:.2f}MB sent, "
               f"SA={'ON' if self.use_sa else 'OFF'}")
     
     def aggregate_evaluate(self, server_round: int, results, failures):
-        """Delegate to base strategy."""
         return self.base.aggregate_evaluate(server_round, results, failures)
     
     def evaluate(self, server_round: int, parameters: Parameters):
-        """Delegate to base strategy."""
         return self.base.evaluate(server_round, parameters)
     
     def get_final_summary(self) -> Dict[str, Any]:
-        """Get final experiment summary."""
+        """Get final summary."""
         total_mb = self.total_bytes_sent / 1e6
         lost_mb = self.total_bytes_lost / 1e6
         
         return {
-            "total_rounds": self.total_rounds,
             "total_bytes_sent_mb": total_mb,
             "total_bytes_lost_mb": lost_mb,
-            "average_bytes_per_round_mb": total_mb / max(self.total_rounds, 1),
             "sa_enabled": self.use_sa,
-            "sa_threshold": self.sa_threshold if self.use_sa else None,
             "round_metrics": self.round_metrics,
         }

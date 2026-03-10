@@ -11,11 +11,12 @@ from try_project.dp_utils import (
     find_noise_multiplier_for_epsilon,
     apply_dp_to_gradients,
 )
+from try_project.secure_agg import SecureAggregation, ProperSecureAggregation
 
 
 class BaselineClient(NumPyClient):
     """
-    Enhanced client with proper DP-SGD, FedProx support, and improved data handling.
+    Enhanced client with proper DP-SGD, FedProx support, and client-side SA masking.
     """
     
     def __init__(
@@ -31,7 +32,6 @@ class BaselineClient(NumPyClient):
         dp_config: Dict[str, Any] = None,
         use_fedprox: bool = False,
         fedprox_mu: float = 0.0,
-        use_sa: bool = False,
     ):
         self.cid = cid
         self.num_clients = num_clients
@@ -44,16 +44,12 @@ class BaselineClient(NumPyClient):
         self.dp_config = dp_config or {}
         self.use_fedprox = use_fedprox
         self.fedprox_mu = fedprox_mu
-        self.use_sa = use_sa
         
         # Store global weights for FedProx
         self.global_weights: Optional[List[np.ndarray]] = None
         
-        # SA configuration (received from server)
-        self.sa_seed: Optional[int] = None
-        
     def fit(self, parameters: List[np.ndarray], config: Dict[str, Any]) -> Tuple[List[np.ndarray], int, Dict]:
-        """Train with optional DP-SGD, FedProx, and SA."""
+        """Train with optional DP-SGD, FedProx, and client-side SA masking."""
         # Handle empty parameters
         if not parameters or len(parameters) == 0:
             print(f"[Client {self.cid}] WARNING: Empty parameters, using current weights")
@@ -70,16 +66,16 @@ class BaselineClient(NumPyClient):
         
         # Check for SA configuration from server
         sa_enabled = config.get("sa_enabled", False)
-        if sa_enabled:
-            self.sa_seed = config.get("sa_round_seed")
-            print(f"[Client {self.cid}] SA enabled (seed={self.sa_seed})")
+        sa_round_seed = config.get("sa_round_seed")
+        sa_all_clients = config.get("sa_all_clients", [])
+        sa_threshold = config.get("sa_threshold", 20)
         
         # Determine training mode
         use_dp = self.use_dp and self.dp_config and self.dp_config.get("noise_multiplier", 0) > 0
         
         if use_dp:
             noise_multiplier = self.dp_config.get("noise_multiplier", 0)
-            l2_norm_clip = self.dp_config.get("l2_norm_clip", 0.5)  # Default 0.5 for better accuracy
+            l2_norm_clip = self.dp_config.get("l2_norm_clip", 0.5)
             print(f"[Client {self.cid}] DP-SGD: σ={noise_multiplier:.4f}, C={l2_norm_clip}, epochs={epochs}")
             
             history = self._train_with_dp(
@@ -108,13 +104,25 @@ class BaselineClient(NumPyClient):
         # Get updated weights
         updated_weights = self.model.get_weights()
         
-        # Apply SA masking if enabled (before returning to server)
-        if sa_enabled and self.sa_seed is not None:
-            from try_project.secure_agg import SecureAggregation
-            sa = SecureAggregation(num_clients=self.num_clients, threshold=20)
-            masks = sa.generate_masks(self.cid, self.sa_seed, updated_weights)
-            updated_weights = sa.mask_weights(updated_weights, masks)
-            print(f"[Client {self.cid}] Applied SA masking")
+        # Apply SA masking on CLIENT SIDE (correct flow)
+        if sa_enabled and sa_round_seed is not None:
+            use_pairwise = len(sa_all_clients) > 0 and len(sa_all_clients) == self.num_clients
+            
+            if use_pairwise:
+                sa = ProperSecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
+                weight_shapes = [w.shape for w in updated_weights]
+                masks = sa.generate_pairwise_masks(
+                    self.cid, sa_round_seed, weight_shapes, sa_all_clients
+                )
+                print(f"[Client {self.cid}] SA pairwise masking applied")
+            else:
+                sa = SecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
+                weight_shapes = [w.shape for w in updated_weights]
+                masks = sa.generate_masks(self.cid, sa_round_seed, weight_shapes)
+                print(f"[Client {self.cid}] SA standard masking applied")
+            
+            masked_weights = sa.mask_weights(updated_weights, masks)
+            updated_weights = masked_weights
         
         # Prepare metrics
         metrics = {
@@ -140,6 +148,7 @@ class BaselineClient(NumPyClient):
         # Add SA metrics
         if sa_enabled:
             metrics["sa_applied"] = True
+            metrics["sa_seed"] = sa_round_seed
         
         return updated_weights, len(self.x_train), metrics
     
@@ -151,7 +160,6 @@ class BaselineClient(NumPyClient):
         l2_norm_clip: float,
     ):
         """Custom training loop with proper DP-SGD."""
-        # Create dataset with proper batching
         dataset = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
         dataset = dataset.shuffle(buffer_size=min(1000, len(self.x_train)))
         dataset = dataset.batch(batch_size)
@@ -172,21 +180,17 @@ class BaselineClient(NumPyClient):
                     predictions = self.model(x_batch, training=True)
                     loss = loss_fn(y_batch, predictions)
                 
-                # Compute gradients
                 trainable_vars = self.model.trainable_variables
                 gradients = tape.gradient(loss, trainable_vars)
                 
-                # Apply DP: clip and add noise
                 dp_gradients = apply_dp_to_gradients(
                     gradients, 
                     noise_multiplier=noise_multiplier, 
                     l2_norm_clip=l2_norm_clip
                 )
                 
-                # Apply gradients
                 optimizer.apply_gradients(zip(dp_gradients, trainable_vars))
                 
-                # Track metrics
                 epoch_losses.append(float(loss))
                 pred_classes = tf.argmax(predictions, axis=1)
                 true_classes = tf.cast(y_batch, pred_classes.dtype)
@@ -195,7 +199,6 @@ class BaselineClient(NumPyClient):
                 ))
                 total_samples += len(y_batch)
             
-            # Record epoch metrics
             avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
             accuracy = correct_predictions / total_samples if total_samples > 0 else 0.0
             history["loss"].append(avg_loss)
@@ -204,7 +207,6 @@ class BaselineClient(NumPyClient):
             if epoch == 0 or epoch == epochs - 1:
                 print(f"[Client {self.cid}] Epoch {epoch+1}/{epochs}: loss={avg_loss:.4f}, acc={accuracy:.4f}")
         
-        # Return history-like object
         class History:
             pass
         h = History()
@@ -236,11 +238,8 @@ class BaselineClient(NumPyClient):
             for x_batch, y_batch in dataset:
                 with tf.GradientTape() as tape:
                     predictions = self.model(x_batch, training=True)
-                    
-                    # Standard loss
                     base_loss = loss_fn(y_batch, predictions)
                     
-                    # FedProx proximal term: (mu/2) * ||w - w_global||^2
                     if self.global_weights is not None:
                         prox_term = 0.0
                         for w, w_global in zip(self.model.trainable_variables, self.global_weights):
@@ -251,11 +250,9 @@ class BaselineClient(NumPyClient):
                     
                     epoch_losses.append(float(base_loss))
                 
-                # Compute and apply gradients
                 gradients = tape.gradient(total_loss, self.model.trainable_variables)
                 optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
                 
-                # Track accuracy
                 pred_classes = tf.argmax(predictions, axis=1)
                 true_classes = tf.cast(y_batch, pred_classes.dtype)
                 correct_predictions += int(tf.reduce_sum(
@@ -263,7 +260,6 @@ class BaselineClient(NumPyClient):
                 ))
                 total_samples += len(y_batch)
             
-            # Record metrics
             avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
             accuracy = correct_predictions / total_samples if total_samples > 0 else 0.0
             history["loss"].append(avg_loss)
@@ -297,31 +293,24 @@ def create_model_with_dp(
     dp_config: Dict[str, Any],
     num_samples: int,
 ) -> Tuple[Any, Dict[str, Any]]:
-    """
-    Create model and compute DP parameters.
-    Uses smaller model when DP is enabled for better accuracy.
-    """
+    """Create model and compute DP parameters."""
     from try_project.task import load_model
     
     dp_info = {}
-    
-    # Use DP-optimized model (smaller) when DP is enabled
     model = load_model(input_shape=input_shape, num_classes=num_classes, for_dp=use_dp)
     
     if not use_dp:
         return model, dp_info
     
-    # DP enabled: compute noise multiplier for target epsilon
     print(f"[DP] Configuring DP-SGD for {num_samples} samples")
     
     target_epsilon = dp_config.get("target_epsilon", 5.0)
     target_delta = dp_config.get("target_delta", 1e-4)
-    l2_norm_clip = dp_config.get("l2_norm_clip", 0.5)  # Default 0.5 for better accuracy
+    l2_norm_clip = dp_config.get("l2_norm_clip", 0.5)
     local_epochs = dp_config.get("local_epochs", 3)
     batch_size = dp_config.get("batch_size", 32)
     noise_multiplier = dp_config.get("noise_multiplier", 0.0)
     
-    # If noise_multiplier not specified, compute from target epsilon
     if noise_multiplier <= 0:
         noise_multiplier, achieved_eps = find_noise_multiplier_for_epsilon(
             target_epsilon=target_epsilon,
@@ -332,7 +321,6 @@ def create_model_with_dp(
         )
         print(f"[DP] Computed σ={noise_multiplier:.4f} for ε={achieved_eps:.2f}")
     else:
-        # Verify achieved epsilon
         achieved_eps, _ = compute_epsilon(
             num_samples=num_samples,
             batch_size=batch_size,
@@ -376,8 +364,6 @@ def client_fn(context: Context):
     # Load data with improved task.py
     non_iid = cfg.get("non-iid", cfg.get("non_iid", True))
     alpha = cfg.get("alpha", 0.5)
-    
-    # Use seed for reproducible but varied splits
     data_seed = cfg.get("data-seed", cfg.get("data_seed", 42))
     
     try:
@@ -386,13 +372,12 @@ def client_fn(context: Context):
             num_clients=num_clients,
             non_iid=non_iid,
             alpha=alpha,
-            seed=data_seed,  # New parameter for reproducibility
+            seed=data_seed,
         )
         print(f"[Client {partition_id}] Loaded: {len(x_train)} train, {len(x_test)} test")
         print(f"[Client {partition_id}] Data range: [{x_train.min():.2f}, {x_train.max():.2f}]")
     except Exception as e:
         print(f"[Client] ERROR loading data: {e}")
-        # Fallback data
         x_train = np.random.randn(100, 100, 3).astype(np.float32)
         y_train = np.random.randint(0, 6, 100)
         x_test = np.random.randn(20, 100, 3).astype(np.float32)
@@ -401,8 +386,6 @@ def client_fn(context: Context):
     # Check features
     use_dp = cfg.get("use-dp", cfg.get("use_dp", False))
     use_fedprox = cfg.get("use-fedprox", cfg.get("use_fedprox", False))
-    use_sa = cfg.get("use-sa", cfg.get("use_sa", False))
-    
     fedprox_mu = cfg.get("fedprox-mu", cfg.get("fedprox_mu", 0.1))
     
     dp_info = {}
@@ -412,14 +395,14 @@ def client_fn(context: Context):
         dp_config = {
             "target_epsilon": cfg.get("target-epsilon", cfg.get("target_epsilon", 5.0)),
             "target_delta": cfg.get("target-delta", cfg.get("target_delta", 1e-4)),
-            "l2_norm_clip": cfg.get("l2-norm-clip", cfg.get("l2_norm_clip", 0.5)),  # Default 0.5
+            "l2_norm_clip": cfg.get("l2-norm-clip", cfg.get("l2_norm_clip", 0.5)),
             "local_epochs": cfg.get("local-epochs", cfg.get("local_epochs", 3)),
             "batch_size": cfg.get("batch-size", cfg.get("batch_size", 32)),
         }
     else:
         dp_config = {}
     
-    # Create model (DP-optimized if use_dp=True)
+    # Create model
     try:
         model, dp_info = create_model_with_dp(
             input_shape=(100, 3),
@@ -430,11 +413,10 @@ def client_fn(context: Context):
         )
     except Exception as e:
         print(f"[Client {partition_id}] ERROR creating model: {e}")
-        # Fallback to standard model
         model = load_model(input_shape=(100, 3), num_classes=6, for_dp=False)
         use_dp = False
     
-    # Log model size for bytes-on-air calculation
+    # Log model size
     model_size = get_model_size(model)
     print(f"[Client {partition_id}] Model size: {model_size/1e6:.2f} MB")
     
@@ -451,10 +433,8 @@ def client_fn(context: Context):
         dp_config=dp_info if use_dp else None,
         use_fedprox=use_fedprox,
         fedprox_mu=fedprox_mu,
-        use_sa=use_sa,
     )
     
-    # CRITICAL: Convert to Client using .to_client()
     return numpy_client.to_client()
 
 
