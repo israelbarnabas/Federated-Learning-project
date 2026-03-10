@@ -1,5 +1,5 @@
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
-from flwr.server.strategy import FedAvg
+from flwr.server.strategy import FedProx
 from flwr.common import Context, ndarrays_to_parameters
 import numpy as np
 
@@ -108,7 +108,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     initial_params = ndarrays_to_parameters(dummy_model.get_weights())
     
     # Standard FedAvg with metrics aggregation
-    base_strategy = FedAvg(
+    base_strategy = FedProx(
         fraction_fit=cfg.get("fraction-train", cfg.get("fraction_train", 1.0)),
         fraction_evaluate=cfg.get("fraction-evaluate", cfg.get("fraction_evaluate", 0.5)),
         min_fit_clients=3,
@@ -117,6 +117,7 @@ def server_fn(context: Context) -> ServerAppComponents:
         initial_parameters=initial_params,
         fit_metrics_aggregation_fn=weighted_average,
         evaluate_metrics_aggregation_fn=weighted_average,
+        proximal_mu= 0.4,
     )
     
     # Check if noisy channel is enabled

@@ -192,13 +192,17 @@ def load_model(input_shape=(100, 3), num_classes=None):
         layers.BatchNormalization(),
         layers.MaxPooling1D(2),
 
+        layers.Conv1D(64, 3, activation='relu'),
+        layers.BatchNormalization(),
+        layers.MaxPooling1D(2),
+
         layers.Conv1D(128, 3, activation='relu'),
         layers.BatchNormalization(),
         layers.MaxPooling1D(2),
         layers.Dropout(0.3),
 
         layers.Flatten(),
-        layers.Dense(64, activation='relu'),
+        layers.Dense(128, activation='relu'),
         layers.Dropout(0.5),
 
         layers.Dense(num_classes, activation='softmax')

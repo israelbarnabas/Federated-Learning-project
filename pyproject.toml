@@ -34,7 +34,7 @@ clientapp = "try_project.client_app:app"
 
 # DEFAULT config (used when no federation specified)
 [tool.flwr.app.config]
-num-rounds = 10
+num-rounds = 30
 local-epochs = 3
 batch-size = 32
 fraction-train = 1.0
@@ -56,7 +56,7 @@ use-dp = true
 l2-norm-clip = 1.0
 noise-multiplier = 0.0
 num-microbatches = 1
-target-epsilon = 10.0
+target-epsilon = 5.0
 target-delta = 0.0001
 
 # FEDERATION-SPECIFIC configs (override defaults)
