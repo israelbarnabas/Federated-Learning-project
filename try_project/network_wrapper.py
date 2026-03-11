@@ -57,49 +57,56 @@ class PassiveNetworkWrapper:
     def initialize_parameters(self, client_manager):
         return self.base.initialize_parameters(client_manager)
     
-    def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
-        """Configure fit with SA parameters."""
-        config_pairs = self.base.configure_fit(server_round, parameters, client_manager)
+def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
+    """Configure fit with SA parameters."""
+    config_pairs = self.base.configure_fit(server_round, parameters, client_manager)
+    
+    if self.use_sa and self.sa:
+        round_seed = self.sa.generate_round_seed(server_round)
         
-        if self.use_sa and self.sa:
-            round_seed = self.sa.generate_round_seed(server_round)
-            
-            # Get all participating client IDs - SORTED for consistency
-            all_client_ids = []
-            for client, fit_ins in config_pairs:
-                try:
-                    all_client_ids.append(int(client.cid))
-                except:
-                    all_client_ids.append(0)
-            
-            # CRITICAL FIX: Sort for consistent ordering across all clients
-            all_client_ids = sorted(all_client_ids)
-            
-            updated_pairs = []
-            for client, fit_ins in config_pairs:
-                try:
-                    cid = int(client.cid)
-                except:
-                    cid = 0
-                
-                # CRITICAL FIX: Create new config dict and new FitIns
-                new_config = dict(fit_ins.config)  # Copy existing config
-                new_config["sa_enabled"] = True
-                new_config["sa_round_seed"] = round_seed
-                new_config["sa_threshold"] = self.sa_threshold
-                new_config["sa_all_clients"] = all_client_ids
-                
-                # Create new FitIns (immutable, must create new)
-                new_fit_ins = FitIns(
-                    parameters=fit_ins.parameters,
-                    config=new_config
-                )
-                
-                updated_pairs.append((client, new_fit_ins))
-            
-            return updated_pairs
+        # Get all participating client IDs - SORTED for consistency
+        all_client_ids = []
+        for client, fit_ins in config_pairs:
+            try:
+                all_client_ids.append(int(client.cid))
+            except:
+                all_client_ids.append(0)
         
-        return config_pairs
+        # CRITICAL FIX: Sort for consistent ordering across all clients
+        all_client_ids = sorted(all_client_ids)
+        
+        # CRITICAL FIX: Convert list to JSON string for RecordDict compatibility
+        import json
+        all_clients_json = json.dumps(all_client_ids)
+        
+        updated_pairs = []
+        for client, fit_ins in config_pairs:
+            try:
+                cid = int(client.cid)
+            except:
+                cid = 0
+            
+            # CRITICAL FIX: Create new config dict with serializable values only
+            new_config = dict(fit_ins.config)  # Copy existing config
+            
+            # Only use scalar types: str, int, float, bool
+            new_config["sa_enabled"] = True  # bool
+            new_config["sa_round_seed"] = round_seed  # int
+            new_config["sa_threshold"] = self.sa_threshold  # int
+            new_config["sa_all_clients_json"] = all_clients_json  # str (JSON)
+            new_config["sa_num_clients"] = len(all_client_ids)  # int (for verification)
+            
+            # Create new FitIns (immutable, must create new)
+            new_fit_ins = FitIns(
+                parameters=fit_ins.parameters,
+                config=new_config
+            )
+            
+            updated_pairs.append((client, new_fit_ins))
+        
+        return updated_pairs
+    
+    return config_pairs
     
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager):
         return self.base.configure_evaluate(server_round, parameters, client_manager)

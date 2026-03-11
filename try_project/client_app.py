@@ -68,7 +68,14 @@ class BaselineClient(NumPyClient):
         sa_enabled = config.get("sa_enabled", False)
         sa_round_seed = config.get("sa_round_seed")
         sa_all_clients = config.get("sa_all_clients", [])
-        sa_threshold = config.get("sa_threshold", 20)
+        sa_threshold = config.get("sa_threshold", 10)
+
+        import json
+        sa_all_clients_json = config.get("sa_all_clients_json", "[]")
+        try:
+            sa_all_clients = json.loads(sa_all_clients_json)
+        except json.JSONDecodeError:
+            sa_all_clients = []
         
         # Determine training mode
         use_dp = self.use_dp and self.dp_config and self.dp_config.get("noise_multiplier", 0) > 0
