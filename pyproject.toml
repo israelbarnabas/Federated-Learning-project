@@ -56,7 +56,7 @@ data-seed = 42
 
 # DP settings
 use-dp = true
-target-epsilon = 5.0
+target-epsilon = 10.0
 target-delta = 0.0001
 l2-norm-clip = 0.5
 noise-multiplier = 0.0
@@ -114,7 +114,7 @@ options.num-supernodes = 30
 [tool.flwr.federations.dp-test.config]
 use-noisy-channel = true
 use-dp = true
-target-epsilon = 3.0
+target-epsilon = 10.0
 l2-norm-clip = 0.5
 num-rounds = 10
 
@@ -125,7 +125,7 @@ options.num-supernodes = 30
 use-noisy-channel = true
 use-dp = true
 use-sa = true
-target-epsilon = 5.0
+target-epsilon = 10.0
 loss-bad = 0.35
 l2-norm-clip = 0.5
 fedprox-mu = 0.05  
@@ -147,7 +147,7 @@ use-noisy-channel = true
 use-dp = true
 use-fedprox = true
 loss-bad = 0.35
-target-epsilon = 5.0
+target-epsilon = 10.0
 l2-norm-clip = 0.5
 fedprox-mu = 0.05
 num-rounds = 10
