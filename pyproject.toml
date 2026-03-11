@@ -64,7 +64,7 @@ num-microbatches = 1
 
 # FedProx settings
 use-fedprox = true
-fedprox-mu = 0.1
+fedprox-mu = 0.05
 
 # Secure Aggregation settings
 use-sa = false
