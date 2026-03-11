@@ -54,14 +54,14 @@ def server_fn(context: Context) -> ServerAppComponents:
     use_noisy = cfg.get("use-noisy-channel", cfg.get("use_noisy_channel", False))
     
     target_epsilon = cfg.get("target-epsilon", cfg.get("target_epsilon", 5.0))
-    fedprox_mu = cfg.get("fedprox-mu", cfg.get("fedprox_mu", 0.1))
+    fedprox_mu = cfg.get("fedprox-mu", cfg.get("fedprox_mu", 0.05))
     
     print(f"[Server] Rounds: {num_rounds}")
     print(f"[Server] DP: {use_dp}, FedProx: {use_fedprox}, SA: {use_sa}, Noisy: {use_noisy}")
     
     # Create initial parameters
     from try_project.task import load_model
-    dummy_model = load_model(input_shape=(100, 3), num_classes=6)
+    dummy_model = load_model(input_shape=(100, 3), num_classes=6, for_dp=use_dp)
     initial_params = ndarrays_to_parameters(dummy_model.get_weights())
     
     # Create strategy: FedProx if enabled, else FedAvg

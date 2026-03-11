@@ -64,13 +64,16 @@ class PassiveNetworkWrapper:
         if self.use_sa and self.sa:
             round_seed = self.sa.generate_round_seed(server_round)
             
-            # Get all participating client IDs
+            # Get all participating client IDs - SORTED for consistency
             all_client_ids = []
             for client, _ in config_pairs:
                 try:
                     all_client_ids.append(int(client.cid))
                 except:
                     all_client_ids.append(0)
+            
+            # CRITICAL FIX: Sort for consistent ordering across all clients
+            all_client_ids = sorted(all_client_ids)
             
             updated_pairs = []
             for client, config in config_pairs:
@@ -82,7 +85,7 @@ class PassiveNetworkWrapper:
                 config["sa_enabled"] = True
                 config["sa_round_seed"] = round_seed
                 config["sa_threshold"] = self.sa_threshold
-                config["sa_all_clients"] = all_client_ids  # For pairwise masking
+                config["sa_all_clients"] = all_client_ids  # Consistent sorted list for all
                 
                 updated_pairs.append((client, config))
             
@@ -122,15 +125,38 @@ class PassiveNetworkWrapper:
         
         post_success = len(network_results)
         
-        # Phase 3: Check SA threshold
+        # Phase 3: Check SA threshold with FALLBACK mechanism
         if self.use_sa:
             if post_success < self.sa_threshold:
-                print(f"[NET] R{server_round}: INSUFFICIENT for SA "
-                      f"({post_success}/{self.sa_threshold}), aborting")
-                # Return previous parameters (no update)
-                return None, {}
+                print(f"[NET] R{server_round}: SA threshold FAILED ({post_success}/{self.sa_threshold})")
+                print(f"[NET] R{server_round}: FALLBACK to standard FedAvg (no SA masking)")
+                
+                # CRITICAL FIX: Fallback to standard aggregation instead of aborting
+                # Log metrics for this round
+                self._log_round_metrics(server_round, pre_success, post_success, round_bytes)
+                
+                # Return standard aggregation without SA
+                # Create new FitRes list without SA metadata to avoid confusion
+                clean_results = []
+                for client, fit_res in network_results:
+                    # Remove SA-specific metadata
+                    clean_metrics = {k: v for k, v in (fit_res.metrics or {}).items() 
+                                   if not k.startswith("_sa_")}
+                    clean_metrics["sa_fallback"] = True
+                    clean_metrics["sa_enabled"] = False
+                    
+                    # Create new FitRes with clean metrics
+                    new_fit_res = FitRes(
+                        status=fit_res.status,
+                        parameters=fit_res.parameters,
+                        num_examples=fit_res.num_examples,
+                        metrics=clean_metrics
+                    )
+                    clean_results.append((client, new_fit_res))
+                
+                return self.base.aggregate_fit(server_round, clean_results, network_failures)
             
-            # Aggregate masked weights (masks cancel in sum)
+            # SA proceeds normally - aggregate masked weights
             network_results = self._aggregate_masked_weights(network_results, server_round)
             print(f"[NET] R{server_round}: SA aggregation with {post_success} clients "
                   f"(masks cancel in sum)")
@@ -287,30 +313,42 @@ class PassiveNetworkWrapper:
             return results
         
         # CRITICAL: Aggregate masked weights
-        # In simplified SA, we assume masks cancel in sum
-        # In proper SA, we use pairwise masking to ensure exact cancellation
-        
         try:
             aggregated = self.sa.aggregate_masked(
                 masked_weights_list, client_ids, round_seed
             )
             
-            # Create single result with aggregated weights
-            first_client, first_fit_res = results[0]
-            first_fit_res.parameters = ndarrays_to_parameters(aggregated)
+            # CRITICAL FIX: Return ALL results with aggregated parameters
+            # Flower's FedAvg expects a list of (client, FitRes) tuples
+            # We give all clients the same aggregated parameters
+            # FedAvg will then weight-average them by num_examples
             
-            # Clean up metadata
-            if first_fit_res.metrics:
-                for key in list(first_fit_res.metrics.keys()):
+            updated_results = []
+            for client, fit_res in results:
+                # Create new FitRes with aggregated parameters
+                new_metrics = fit_res.metrics or {}
+                
+                # Remove internal SA metadata
+                for key in list(new_metrics.keys()):
                     if key.startswith("_sa_"):
-                        del first_fit_res.metrics[key]
+                        del new_metrics[key]
+                
+                new_metrics["sa_aggregated"] = True
+                new_metrics["sa_clients_in_agg"] = len(client_ids)
+                
+                new_fit_res = FitRes(
+                    status=fit_res.status,
+                    parameters=ndarrays_to_parameters(aggregated),
+                    num_examples=fit_res.num_examples,
+                    metrics=new_metrics
+                )
+                updated_results.append((client, new_fit_res))
             
-            # Return only aggregated result (others redundant)
-            return [(first_client, first_fit_res)]
+            return updated_results
             
         except Exception as e:
             print(f"[SA] Aggregation failed: {e}")
-            # Fallback: return unaggregated (will likely fail downstream)
+            # Fallback: return original results (will likely have privacy issues but won't crash)
             return results
     
     def _log_round_metrics(self, server_round: int, pre: int, post: int, bytes_dict: Dict):

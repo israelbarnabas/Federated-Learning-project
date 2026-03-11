@@ -67,8 +67,8 @@ use-fedprox = true
 fedprox-mu = 0.05
 
 # Secure Aggregation settings
-use-sa = false
-sa-threshold = 15
+use-sa = true
+sa-threshold = 10
 
 # FEDERATION-SPECIFIC configs
 [tool.flwr.federations]
@@ -128,7 +128,7 @@ use-sa = true
 target-epsilon = 5.0
 loss-bad = 0.35
 l2-norm-clip = 0.5
-fedprox-mu = 0.05  # Fixed: was 0.0.5
+fedprox-mu = 0.05  
 num-rounds = 10
 
 [tool.flwr.federations.fedprox-baseline]
