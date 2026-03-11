@@ -4,7 +4,7 @@ Server aggregates masked weights; never sees individual unmasked updates.
 """
 
 from typing import Dict, Any, List, Tuple, Optional
-from flwr.common import FitRes, Parameters, ndarrays_to_parameters, parameters_to_ndarrays
+from flwr.common import FitRes, Parameters, ndarrays_to_parameters, parameters_to_ndarrays, FitIns
 from flwr.server.client_proxy import ClientProxy
 import numpy as np
 
@@ -66,7 +66,7 @@ class PassiveNetworkWrapper:
             
             # Get all participating client IDs - SORTED for consistency
             all_client_ids = []
-            for client, _ in config_pairs:
+            for client, fit_ins in config_pairs:
                 try:
                     all_client_ids.append(int(client.cid))
                 except:
@@ -76,18 +76,26 @@ class PassiveNetworkWrapper:
             all_client_ids = sorted(all_client_ids)
             
             updated_pairs = []
-            for client, config in config_pairs:
+            for client, fit_ins in config_pairs:
                 try:
                     cid = int(client.cid)
                 except:
                     cid = 0
                 
-                config["sa_enabled"] = True
-                config["sa_round_seed"] = round_seed
-                config["sa_threshold"] = self.sa_threshold
-                config["sa_all_clients"] = all_client_ids  # Consistent sorted list for all
+                # CRITICAL FIX: Create new config dict and new FitIns
+                new_config = dict(fit_ins.config)  # Copy existing config
+                new_config["sa_enabled"] = True
+                new_config["sa_round_seed"] = round_seed
+                new_config["sa_threshold"] = self.sa_threshold
+                new_config["sa_all_clients"] = all_client_ids
                 
-                updated_pairs.append((client, config))
+                # Create new FitIns (immutable, must create new)
+                new_fit_ins = FitIns(
+                    parameters=fit_ins.parameters,
+                    config=new_config
+                )
+                
+                updated_pairs.append((client, new_fit_ins))
             
             return updated_pairs
         
@@ -132,20 +140,16 @@ class PassiveNetworkWrapper:
                 print(f"[NET] R{server_round}: FALLBACK to standard FedAvg (no SA masking)")
                 
                 # CRITICAL FIX: Fallback to standard aggregation instead of aborting
-                # Log metrics for this round
                 self._log_round_metrics(server_round, pre_success, post_success, round_bytes)
                 
                 # Return standard aggregation without SA
-                # Create new FitRes list without SA metadata to avoid confusion
                 clean_results = []
                 for client, fit_res in network_results:
-                    # Remove SA-specific metadata
                     clean_metrics = {k: v for k, v in (fit_res.metrics or {}).items() 
                                    if not k.startswith("_sa_")}
                     clean_metrics["sa_fallback"] = True
                     clean_metrics["sa_enabled"] = False
                     
-                    # Create new FitRes with clean metrics
                     new_fit_res = FitRes(
                         status=fit_res.status,
                         parameters=fit_res.parameters,
@@ -174,9 +178,6 @@ class PassiveNetworkWrapper:
     ) -> List[Tuple[ClientProxy, FitRes]]:
         """
         Simulate client-side SA masking.
-        
-        In real deployment, clients do this. We simulate it here
-        to measure the network impact (masked weights are same size).
         """
         round_seed = self.sa.generate_round_seed(server_round)
         masked_results = []
@@ -202,7 +203,7 @@ class PassiveNetworkWrapper:
                 # Update FitRes with masked weights
                 fit_res.parameters = ndarrays_to_parameters(masked_weights)
                 
-                # Store metadata for aggregation (not for unmasking)
+                # Store metadata for aggregation
                 fit_res.metrics = fit_res.metrics or {}
                 fit_res.metrics["_sa_mask_applied"] = True
                 fit_res.metrics["_sa_client_id"] = cid
@@ -211,7 +212,6 @@ class PassiveNetworkWrapper:
                 
             except Exception as e:
                 print(f"[SA] Masking failed for client {client.cid}: {e}")
-                # Include unmasked (will corrupt aggregation if too many)
                 masked_results.append((client, fit_res))
         
         return masked_results
@@ -247,10 +247,10 @@ class PassiveNetworkWrapper:
                 }
             
             if success:
-                # SA doubles the effective size (masks + masked weights)
+                # SA doubles the effective size
                 bytes_transmitted = self.model_bytes * net_metrics.get("retrans_factor", 1.0)
                 if self.use_sa:
-                    bytes_transmitted *= 2.0  # Mask overhead
+                    bytes_transmitted *= 2.0
                 
                 round_bytes_sent += bytes_transmitted
                 
@@ -287,9 +287,6 @@ class PassiveNetworkWrapper:
     ) -> List[Tuple[ClientProxy, FitRes]]:
         """
         Aggregate masked weights where masks cancel out.
-        
-        CORRECT SA FLOW: Server sums masked weights; masks cancel in aggregation.
-        Server NEVER sees individual unmasked updates.
         """
         if not results:
             return results
@@ -312,20 +309,14 @@ class PassiveNetworkWrapper:
         if not masked_weights_list:
             return results
         
-        # CRITICAL: Aggregate masked weights
         try:
             aggregated = self.sa.aggregate_masked(
                 masked_weights_list, client_ids, round_seed
             )
             
             # CRITICAL FIX: Return ALL results with aggregated parameters
-            # Flower's FedAvg expects a list of (client, FitRes) tuples
-            # We give all clients the same aggregated parameters
-            # FedAvg will then weight-average them by num_examples
-            
             updated_results = []
             for client, fit_res in results:
-                # Create new FitRes with aggregated parameters
                 new_metrics = fit_res.metrics or {}
                 
                 # Remove internal SA metadata
@@ -348,7 +339,6 @@ class PassiveNetworkWrapper:
             
         except Exception as e:
             print(f"[SA] Aggregation failed: {e}")
-            # Fallback: return original results (will likely have privacy issues but won't crash)
             return results
     
     def _log_round_metrics(self, server_round: int, pre: int, post: int, bytes_dict: Dict):
