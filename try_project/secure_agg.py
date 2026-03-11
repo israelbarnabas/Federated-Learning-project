@@ -43,18 +43,29 @@ class SecureAggregation:
     ) -> List[np.ndarray]:
         """
         Generate masks for a client using deterministic PRNG.
-        
-        Each client's masks are derived from:
-        - Global round seed (known to all)
-        - Client ID (unique per client)
-        
-        The key: sum of all client masks ≈ 0 (by design of shared randomness)
         """
         client_seed = self.generate_client_seed(client_id, round_seed)
         rng = np.random.default_rng(client_seed)
         
         masks = []
         for shape in weight_shapes:
+            # DEFENSIVE: Handle any shape format
+            try:
+                # If it's a numpy array, convert to tuple of ints
+                if hasattr(shape, 'shape'):  # numpy array
+                    shape = tuple(int(s) for s in shape.shape)
+                # If it's a list, convert to tuple
+                elif isinstance(shape, list):
+                    shape = tuple(int(s) for s in shape)
+                # If it's already a tuple, ensure all elements are int
+                elif isinstance(shape, tuple):
+                    shape = tuple(int(s) for s in shape)
+                else:
+                    shape = (int(shape),)
+            except (TypeError, ValueError):
+                # Fallback: assume it's a numpy array and extract shape
+                shape = tuple(int(s) for s in np.array(shape).shape)
+                
             # Generate mask with small scale
             mask = rng.normal(0, self.mask_scale, size=shape).astype(np.float32)
             masks.append(mask)
@@ -94,6 +105,18 @@ class SecureAggregation:
         # Average to get final update
         return [w / len(client_ids) for w in aggregated]
     
+    def unmask_aggregate(
+        self,
+        masked_weights_list: List[List[np.ndarray]],
+        client_ids: List[int],
+        round_seed: int,
+    ) -> List[np.ndarray]:
+        """
+        Alias for aggregate_masked for backward compatibility with tests.
+        """
+        return self.aggregate_masked(masked_weights_list, client_ids, round_seed)
+
+
     def verify_mask_cancellation(
         self,
         client_ids: List[int],
@@ -130,13 +153,23 @@ class ProperSecureAggregation(SecureAggregation):
     ) -> List[np.ndarray]:
         """
         Generate masks as sum of pairwise shared randomness.
-        
-        For client i: mask_i = sum_{j≠i} (PRNG(seed_{i,j}) - PRNG(seed_{j,i}))
-        where seed_{i,j} = seed_{j,i} (shared)
-        
-        Result: sum_i mask_i = 0 (exactly)
         """
-        masks = [np.zeros(shape, dtype=np.float32) for shape in weight_shapes]
+        # Process shapes defensively
+        processed_shapes = []
+        for shape in weight_shapes:
+            try:
+                if hasattr(shape, 'shape'):  # numpy array
+                    processed_shapes.append(tuple(int(s) for s in shape.shape))
+                elif isinstance(shape, list):
+                    processed_shapes.append(tuple(int(s) for s in shape))
+                elif isinstance(shape, tuple):
+                    processed_shapes.append(tuple(int(s) for s in shape))
+                else:
+                    processed_shapes.append((int(shape),))
+            except (TypeError, ValueError):
+                processed_shapes.append(tuple(int(s) for s in np.array(shape).shape))
+        
+        masks = [np.zeros(shape, dtype=np.float32) for shape in processed_shapes]
         
         for other_id in all_client_ids:
             if other_id == client_id:
@@ -146,7 +179,7 @@ class ProperSecureAggregation(SecureAggregation):
             shared_seed = self._generate_pairwise_seed(client_id, other_id, round_seed)
             rng = np.random.default_rng(shared_seed)
             
-            for i, shape in enumerate(weight_shapes):
+            for i, shape in enumerate(processed_shapes):
                 # Client i adds positive, subtracts negative from others
                 if other_id > client_id:
                     masks[i] += rng.normal(0, self.mask_scale, size=shape).astype(np.float32)

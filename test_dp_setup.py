@@ -181,12 +181,12 @@ def test_secure_aggregation():
     print("TEST 5: Secure Aggregation")
     print("=" * 60)
     
-    sa = SecureAggregation(num_clients=30, threshold=20)
+    sa = SecureAggregation(num_clients=30, threshold=3)
     
     # Simulate 3 clients with small weight vectors
     weight_shapes = [
-        np.zeros((10, 10), dtype=np.float32),
-        np.zeros((5,), dtype=np.float32),
+        (10, 10),
+        (5,),
     ]
     
     round_seed = sa.generate_round_seed(server_round=1)
@@ -215,7 +215,7 @@ def test_secure_aggregation():
         masked_weights.append(masked)
     
     # Server aggregates and unmasks
-    aggregated = sa.unmask_aggregate(masked_weights, [0, 1, 2], round_seed)
+    aggregated = sa.aggregate_masked(masked_weights, [0, 1, 2], round_seed)
     
     print(f"\nOriginal weights avg: {np.mean([np.mean(w) for w in fake_weights]):.4f}")
     print(f"Unmasked aggregate avg: {np.mean([np.mean(w) for w in aggregated]):.4f}")

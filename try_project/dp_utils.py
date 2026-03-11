@@ -40,6 +40,8 @@ def compute_epsilon_simple(
         "sampling_rate": sampling_rate,
         "noise_multiplier": noise_multiplier,
         "epsilon": epsilon,
+        "log_term": log_term,
+        "composition_factor": composition_factor,
     }
 
 
