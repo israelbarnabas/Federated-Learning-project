@@ -136,7 +136,7 @@ options.num-supernodes = 30
 
 [tool.flwr.federations.fedprox-baseline.config]
 use-fedprox = true
-fedprox-mu = 0.1
+fedprox-mu = 0.05
 num-rounds = 10
 
 [tool.flwr.federations.dp-fedprox-heavy]
@@ -149,5 +149,5 @@ use-fedprox = true
 loss-bad = 0.35
 target-epsilon = 5.0
 l2-norm-clip = 0.5
-fedprox-mu = 0.1
+fedprox-mu = 0.05
 num-rounds = 10
