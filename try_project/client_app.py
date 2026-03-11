@@ -213,66 +213,78 @@ class BaselineClient(NumPyClient):
         h.history = history
         return h
     
-    def _train_with_fedprox(
-        self,
-        epochs: int,
-        batch_size: int,
-        mu: float,
-    ):
-        """FedProx training with proximal term."""
-        dataset = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
-        dataset = dataset.shuffle(buffer_size=min(1000, len(self.x_train)))
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+def _train_with_fedprox(
+    self,
+    epochs: int,
+    batch_size: int,
+    mu: float,
+):
+    """FedProx training with proximal term - FIXED VERSION."""
+    dataset = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
+    dataset = dataset.shuffle(buffer_size=min(1000, len(self.x_train)))
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    
+    optimizer = self.model.optimizer
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+    
+    history = {"loss": [], "accuracy": []}
+    
+    for epoch in range(epochs):
+        epoch_losses = []
+        correct_predictions = 0
+        total_samples = 0
         
-        optimizer = self.model.optimizer
-        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
-        
-        history = {"loss": [], "accuracy": []}
-        
-        for epoch in range(epochs):
-            epoch_losses = []
-            correct_predictions = 0
-            total_samples = 0
-            
-            for x_batch, y_batch in dataset:
-                with tf.GradientTape() as tape:
-                    predictions = self.model(x_batch, training=True)
-                    base_loss = loss_fn(y_batch, predictions)
-                    
-                    if self.global_weights is not None:
-                        prox_term = 0.0
-                        for w, w_global in zip(self.model.trainable_variables, self.global_weights):
-                            prox_term += tf.reduce_sum(tf.square(w - w_global))
-                        total_loss = base_loss + (mu / 2.0) * prox_term
-                    else:
-                        total_loss = base_loss
-                    
-                    epoch_losses.append(float(base_loss))
+        for x_batch, y_batch in dataset:
+            with tf.GradientTape() as tape:
+                predictions = self.model(x_batch, training=True)
+                base_loss = loss_fn(y_batch, predictions)
                 
-                gradients = tape.gradient(total_loss, self.model.trainable_variables)
-                optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+                # FIXED: Use model.get_weights() instead of trainable_variables
+                if self.global_weights is not None and mu > 0:
+                    prox_term = 0.0
+                    current_weights = self.model.get_weights()
+                    
+                    # Ensure both lists have same length
+                    for i, (curr_w, glob_w) in enumerate(zip(current_weights, self.global_weights)):
+                        if curr_w.shape == glob_w.shape:
+                            # Convert to tensors for computation
+                            curr_w_tensor = tf.convert_to_tensor(curr_w, dtype=tf.float32)
+                            glob_w_tensor = tf.convert_to_tensor(glob_w, dtype=tf.float32)
+                            prox_term += tf.reduce_sum(tf.square(curr_w_tensor - glob_w_tensor))
+                        else:
+                            print(f"[Client {self.cid}] Warning: Shape mismatch at index {i}: "
+                                  f"current {curr_w.shape} vs global {glob_w.shape}")
+                    
+                    total_loss = base_loss + (mu / 2.0) * prox_term
+                else:
+                    total_loss = base_loss
                 
-                pred_classes = tf.argmax(predictions, axis=1)
-                true_classes = tf.cast(y_batch, pred_classes.dtype)
-                correct_predictions += int(tf.reduce_sum(
-                    tf.cast(pred_classes == true_classes, tf.int32)
-                ))
-                total_samples += len(y_batch)
+                epoch_losses.append(float(base_loss))
             
-            avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-            accuracy = correct_predictions / total_samples if total_samples > 0 else 0.0
-            history["loss"].append(avg_loss)
-            history["accuracy"].append(accuracy)
+            gradients = tape.gradient(total_loss, self.model.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
             
-            if epoch == 0 or epoch == epochs - 1:
-                print(f"[Client {self.cid}] Epoch {epoch+1}/{epochs}: loss={avg_loss:.4f}, acc={accuracy:.4f} (FedProx μ={mu})")
+            pred_classes = tf.argmax(predictions, axis=1)
+            true_classes = tf.cast(y_batch, pred_classes.dtype)
+            correct_predictions += int(tf.reduce_sum(
+                tf.cast(pred_classes == true_classes, tf.int32)
+            ))
+            total_samples += len(y_batch)
         
-        class History:
-            pass
-        h = History()
-        h.history = history
-        return h
+        avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
+        accuracy = correct_predictions / total_samples if total_samples > 0 else 0.0
+        history["loss"].append(avg_loss)
+        history["accuracy"].append(accuracy)
+        
+        if epoch == 0 or epoch == epochs - 1:
+            print(f"[Client {self.cid}] Epoch {epoch+1}/{epochs}: loss={avg_loss:.4f}, acc={accuracy:.4f} (FedProx μ={mu})")
+    
+    class History:
+        pass
+    h = History()
+    h.history = history
+    return h
     
     def evaluate(self, parameters: List[np.ndarray], config: Dict[str, Any]) -> Tuple[float, int, Dict]:
         """Evaluate model."""

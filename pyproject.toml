@@ -63,7 +63,7 @@ noise-multiplier = 0.0
 num-microbatches = 1
 
 # FedProx settings
-use-fedprox = false
+use-fedprox = true
 fedprox-mu = 0.1
 
 # Secure Aggregation settings
