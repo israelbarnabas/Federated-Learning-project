@@ -3,6 +3,7 @@ from flwr.common import Context, ndarrays_to_parameters, parameters_to_ndarrays
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import tensorflow as tf
+import json
 
 from try_project.task import get_client_data, load_model, get_model_size
 from try_project.dp_utils import (
@@ -48,6 +49,9 @@ class BaselineClient(NumPyClient):
         # Store global weights for FedProx
         self.global_weights: Optional[List[np.ndarray]] = None
         
+        # Initialize SA for client-side masking
+        self.sa = None
+        
     def fit(self, parameters: List[np.ndarray], config: Dict[str, Any]) -> Tuple[List[np.ndarray], int, Dict]:
         """Train with optional DP-SGD, FedProx, and client-side SA masking."""
         # Handle empty parameters
@@ -67,15 +71,16 @@ class BaselineClient(NumPyClient):
         # Check for SA configuration from server
         sa_enabled = config.get("sa_enabled", False)
         sa_round_seed = config.get("sa_round_seed")
-        sa_all_clients = config.get("sa_all_clients", [])
-        sa_threshold = config.get("sa_threshold", 10)
-
-        import json
+        sa_threshold = config.get("sa_threshold", 20)
+        
+        # CRITICAL FIX: Parse JSON string back to list
         sa_all_clients_json = config.get("sa_all_clients_json", "[]")
         try:
             sa_all_clients = json.loads(sa_all_clients_json)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             sa_all_clients = []
+        
+        sa_pairwise = config.get("sa_pairwise", False)
         
         # Determine training mode
         use_dp = self.use_dp and self.dp_config and self.dp_config.get("noise_multiplier", 0) > 0
@@ -113,23 +118,28 @@ class BaselineClient(NumPyClient):
         
         # Apply SA masking on CLIENT SIDE (correct flow)
         if sa_enabled and sa_round_seed is not None:
-            use_pairwise = len(sa_all_clients) > 0 and len(sa_all_clients) == self.num_clients
+            # Initialize SA if not already done
+            if self.sa is None:
+                if sa_pairwise:
+                    self.sa = ProperSecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
+                else:
+                    self.sa = SecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
             
-            if use_pairwise:
-                sa = ProperSecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
-                weight_shapes = [w.shape for w in updated_weights]
-                masks = sa.generate_pairwise_masks(
+            weight_shapes = [w.shape for w in updated_weights]
+            
+            # Use pairwise masking if enabled and we have client list
+            if sa_pairwise and sa_all_clients and len(sa_all_clients) > 0:
+                masks = self.sa.generate_pairwise_masks(
                     self.cid, sa_round_seed, weight_shapes, sa_all_clients
                 )
-                print(f"[Client {self.cid}] SA pairwise masking applied")
+                mask_type = "pairwise"
             else:
-                sa = SecureAggregation(num_clients=self.num_clients, threshold=sa_threshold)
-                weight_shapes = [w.shape for w in updated_weights]
-                masks = sa.generate_masks(self.cid, sa_round_seed, weight_shapes)
-                print(f"[Client {self.cid}] SA standard masking applied")
+                masks = self.sa.generate_masks(self.cid, sa_round_seed, weight_shapes)
+                mask_type = "simple"
             
-            masked_weights = sa.mask_weights(updated_weights, masks)
+            masked_weights = self.sa.mask_weights(updated_weights, masks)
             updated_weights = masked_weights
+            print(f"[Client {self.cid}] SA {mask_type} masking applied")
         
         # Prepare metrics
         metrics = {

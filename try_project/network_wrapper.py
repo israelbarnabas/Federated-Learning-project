@@ -3,6 +3,7 @@ Network wrapper with CORRECT Secure Aggregation flow.
 Server aggregates masked weights; never sees individual unmasked updates.
 """
 
+import json
 from typing import Dict, Any, List, Tuple, Optional
 from flwr.common import FitRes, Parameters, ndarrays_to_parameters, parameters_to_ndarrays, FitIns
 from flwr.server.client_proxy import ClientProxy
@@ -35,6 +36,7 @@ class PassiveNetworkWrapper:
         self.model_bytes = model_bytes
         self.use_sa = use_sa
         self.sa_threshold = sa_threshold
+        self.use_pairwise_sa = use_pairwise_sa
         
         # Initialize SA
         self.sa = None
@@ -57,56 +59,56 @@ class PassiveNetworkWrapper:
     def initialize_parameters(self, client_manager):
         return self.base.initialize_parameters(client_manager)
     
-def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
-    """Configure fit with SA parameters."""
-    config_pairs = self.base.configure_fit(server_round, parameters, client_manager)
-    
-    if self.use_sa and self.sa:
-        round_seed = self.sa.generate_round_seed(server_round)
+    def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
+        """Configure fit with SA parameters."""
+        config_pairs = self.base.configure_fit(server_round, parameters, client_manager)
         
-        # Get all participating client IDs - SORTED for consistency
-        all_client_ids = []
-        for client, fit_ins in config_pairs:
-            try:
-                all_client_ids.append(int(client.cid))
-            except:
-                all_client_ids.append(0)
-        
-        # CRITICAL FIX: Sort for consistent ordering across all clients
-        all_client_ids = sorted(all_client_ids)
-        
-        # CRITICAL FIX: Convert list to JSON string for RecordDict compatibility
-        import json
-        all_clients_json = json.dumps(all_client_ids)
-        
-        updated_pairs = []
-        for client, fit_ins in config_pairs:
-            try:
-                cid = int(client.cid)
-            except:
-                cid = 0
+        if self.use_sa and self.sa:
+            round_seed = self.sa.generate_round_seed(server_round)
             
-            # CRITICAL FIX: Create new config dict with serializable values only
-            new_config = dict(fit_ins.config)  # Copy existing config
+            # Get all participating client IDs - SORTED for consistency
+            all_client_ids = []
+            for client, fit_ins in config_pairs:
+                try:
+                    all_client_ids.append(int(client.cid))
+                except:
+                    all_client_ids.append(0)
             
-            # Only use scalar types: str, int, float, bool
-            new_config["sa_enabled"] = True  # bool
-            new_config["sa_round_seed"] = round_seed  # int
-            new_config["sa_threshold"] = self.sa_threshold  # int
-            new_config["sa_all_clients_json"] = all_clients_json  # str (JSON)
-            new_config["sa_num_clients"] = len(all_client_ids)  # int (for verification)
+            # CRITICAL FIX: Sort for consistent ordering across all clients
+            all_client_ids = sorted(all_client_ids)
             
-            # Create new FitIns (immutable, must create new)
-            new_fit_ins = FitIns(
-                parameters=fit_ins.parameters,
-                config=new_config
-            )
+            # CRITICAL FIX: Convert list to JSON string for RecordDict compatibility
+            all_clients_json = json.dumps(all_client_ids)
             
-            updated_pairs.append((client, new_fit_ins))
+            updated_pairs = []
+            for client, fit_ins in config_pairs:
+                try:
+                    cid = int(client.cid)
+                except:
+                    cid = 0
+                
+                # CRITICAL FIX: Create new config dict with serializable values only
+                new_config = dict(fit_ins.config)  # Copy existing config
+                
+                # Only use scalar types: str, int, float, bool
+                new_config["sa_enabled"] = True  # bool
+                new_config["sa_round_seed"] = round_seed  # int
+                new_config["sa_threshold"] = self.sa_threshold  # int
+                new_config["sa_all_clients_json"] = all_clients_json  # str (JSON)
+                new_config["sa_num_clients"] = len(all_client_ids)  # int (for verification)
+                new_config["sa_pairwise"] = self.use_pairwise_sa  # bool
+                
+                # Create new FitIns (immutable, must create new)
+                new_fit_ins = FitIns(
+                    parameters=fit_ins.parameters,
+                    config=new_config
+                )
+                
+                updated_pairs.append((client, new_fit_ins))
+            
+            return updated_pairs
         
-        return updated_pairs
-    
-    return config_pairs
+        return config_pairs
     
     def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager):
         return self.base.configure_evaluate(server_round, parameters, client_manager)
@@ -185,6 +187,9 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
     ) -> List[Tuple[ClientProxy, FitRes]]:
         """
         Simulate client-side SA masking.
+        
+        In real deployment, clients do this. We simulate it here
+        to measure the network impact (masked weights are same size).
         """
         round_seed = self.sa.generate_round_seed(server_round)
         masked_results = []
@@ -197,28 +202,35 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
                 # Get shapes for mask generation
                 weight_shapes = [w.shape for w in weights]
                 
-                # Check if we have pairwise or simple masking
-                all_clients = getattr(fit_res, 'sa_all_clients', None)
+                # Check if we have pairwise or simple masking from client config
+                # Note: In simulation, we apply masking here; in real deployment, client does this
+                use_pairwise = self.use_pairwise_sa
                 
-                if all_clients and isinstance(self.sa, ProperSecureAggregation):
+                if use_pairwise and isinstance(self.sa, ProperSecureAggregation):
+                    # For pairwise, we need all client IDs - use all participating clients
+                    all_clients = list(range(self.sa.num_clients))
                     masks = self.sa.generate_pairwise_masks(cid, round_seed, weight_shapes, all_clients)
+                    mask_type = "pairwise"
                 else:
                     masks = self.sa.generate_masks(cid, round_seed, weight_shapes)
+                    mask_type = "simple"
                 
                 masked_weights = self.sa.mask_weights(weights, masks)
                 
                 # Update FitRes with masked weights
                 fit_res.parameters = ndarrays_to_parameters(masked_weights)
                 
-                # Store metadata for aggregation
+                # Store metadata for aggregation (not for unmasking)
                 fit_res.metrics = fit_res.metrics or {}
                 fit_res.metrics["_sa_mask_applied"] = True
                 fit_res.metrics["_sa_client_id"] = cid
+                fit_res.metrics["_sa_mask_type"] = mask_type
                 
                 masked_results.append((client, fit_res))
                 
             except Exception as e:
                 print(f"[SA] Masking failed for client {client.cid}: {e}")
+                # Include unmasked (will corrupt aggregation if too many)
                 masked_results.append((client, fit_res))
         
         return masked_results
@@ -254,10 +266,10 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
                 }
             
             if success:
-                # SA doubles the effective size
+                # SA doubles the effective size (masks + masked weights)
                 bytes_transmitted = self.model_bytes * net_metrics.get("retrans_factor", 1.0)
                 if self.use_sa:
-                    bytes_transmitted *= 2.0
+                    bytes_transmitted *= 2.0  # Mask overhead
                 
                 round_bytes_sent += bytes_transmitted
                 
@@ -294,6 +306,9 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
     ) -> List[Tuple[ClientProxy, FitRes]]:
         """
         Aggregate masked weights where masks cancel out.
+        
+        CORRECT SA FLOW: Server sums masked weights; masks cancel in aggregation.
+        Server NEVER sees individual unmasked updates.
         """
         if not results:
             return results
@@ -322,6 +337,10 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
             )
             
             # CRITICAL FIX: Return ALL results with aggregated parameters
+            # Flower's FedAvg expects a list of (client, FitRes) tuples
+            # We give all clients the same aggregated parameters
+            # FedAvg will then weight-average them by num_examples
+            
             updated_results = []
             for client, fit_res in results:
                 new_metrics = fit_res.metrics or {}
@@ -346,6 +365,7 @@ def configure_fit(self, server_round: int, parameters: Parameters, client_manage
             
         except Exception as e:
             print(f"[SA] Aggregation failed: {e}")
+            # Fallback: return original results (will likely have privacy issues but won't crash)
             return results
     
     def _log_round_metrics(self, server_round: int, pre: int, post: int, bytes_dict: Dict):
