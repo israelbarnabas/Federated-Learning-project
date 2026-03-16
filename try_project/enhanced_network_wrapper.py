@@ -72,7 +72,8 @@ class LinkAwareNetworkWrapper:
         available_cids = []
         for cid in available_clients:
             try:
-                available_cids.append(int(cid))
+                # FIXED: Force modulo immediately upon parsing
+                available_cids.append(int(cid) % self.channel.num_clients)
             except:
                 available_cids.append(hash(cid) % self.channel.num_clients)
         
@@ -102,7 +103,8 @@ class LinkAwareNetworkWrapper:
         filtered_pairs = []
         for client, fit_ins in config_pairs:
             try:
-                cid = int(client.cid)
+                # FIXED: Force modulo immediately
+                cid = int(client.cid) % self.channel.num_clients
             except:
                 cid = hash(client.cid) % self.channel.num_clients
             
@@ -133,7 +135,8 @@ class LinkAwareNetworkWrapper:
         client_ids = []
         for client, fit_res in results:
             try:
-                cid = int(client.cid)
+                # FIXED: Force modulo immediately
+                cid = int(client.cid) % self.channel.num_clients
             except:
                 cid = hash(client.cid) % self.channel.num_clients
             client_ids.append(cid)
@@ -163,9 +166,6 @@ class LinkAwareNetworkWrapper:
             client_success = {cid: (cid in successful_cids) for cid in self._current_round_config.get('selected_cids', [])}
             self.scheduler.update_performance_metrics(avg_accuracy, avg_latency, total_bytes, client_success)
             
-            # ==========================================
-            # NEW LOGIC: EXPORT METRICS TO JSON
-            # ==========================================
             os.makedirs("results", exist_ok=True)
             drop_rate = 1.0 - (len(successful_cids) / max(len(client_ids), 1))
             current_epsilon = self.scheduler.get_privacy_summary()["total_epsilon_spent"]
@@ -181,7 +181,6 @@ class LinkAwareNetworkWrapper:
             
             with open(f"results/metrics_round_{server_round:02d}.json", "w") as f:
                 json.dump(round_data, f, indent=4)
-            # ==========================================
             
         return self.base.aggregate_fit(server_round, successful_results, failures)
     
@@ -192,7 +191,8 @@ class LinkAwareNetworkWrapper:
         masked_results = []
         for client, fit_res in results:
             try:
-                cid = int(client.cid)
+                # FIXED: Force modulo immediately
+                cid = int(client.cid) % self.channel.num_clients
             except:
                 cid = hash(client.cid) % self.channel.num_clients
             

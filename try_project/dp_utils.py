@@ -201,10 +201,16 @@ def find_noise_multiplier_for_epsilon_rdp(
     sigma_low = 0.1
     sigma_high = 100.0
     
-    # Check feasibility
+    # Check feasibility at MAX noise (sigma_high)
+    eps_at_high, _ = compute_epsilon_rdp(num_samples, batch_size, sigma_high, epochs, delta)
+    if eps_at_high > target_epsilon:
+        print(f"Warning: Cannot achieve epsilon={target_epsilon} even with max sigma={sigma_high}")
+        return sigma_high, eps_at_high
+        
+    # Check feasibility at MIN noise (sigma_low)
     eps_at_low, _ = compute_epsilon_rdp(num_samples, batch_size, sigma_low, epochs, delta)
-    if eps_at_low > target_epsilon:
-        print(f"Warning: Cannot achieve epsilon={target_epsilon} even with sigma={sigma_low}")
+    if eps_at_low < target_epsilon:
+        # Min noise is already more private than requested
         return sigma_low, eps_at_low
     
     # Binary search
@@ -216,10 +222,10 @@ def find_noise_multiplier_for_epsilon_rdp(
             return sigma_mid, eps_mid
         
         if eps_mid > target_epsilon:
-            # Need more noise
+            # Epsilon too high -> need more privacy -> need MORE noise
             sigma_low = sigma_mid
         else:
-            # Can use less noise
+            # Epsilon too low -> have excess privacy -> can use LESS noise
             sigma_high = sigma_mid
     
     # Return best found
