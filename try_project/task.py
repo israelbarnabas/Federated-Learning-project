@@ -1,4 +1,3 @@
-# try_project/task.py
 """
 Enhanced FL task module for WISDM dataset with improved preprocessing,
 smaller model for DP compatibility, and better data distribution.
@@ -293,7 +292,6 @@ def get_client_data(client_id, num_clients, non_iid=True, alpha=0.5, seed=42,
 def load_model(input_shape=(100, 3), num_classes=None, for_dp=False):
     """
     Create CNN model for HAR.
-    
     Args:
         for_dp: If True, use smaller model suitable for DP training
                (fewer parameters = less noise needed)
