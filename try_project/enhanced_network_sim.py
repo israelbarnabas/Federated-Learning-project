@@ -1,6 +1,7 @@
 """
 Enhanced AIoT Network Simulator with 3-State Markov Channel, Pareto Latency,
 Shared Medium Congestion, and Physical-Layer Inspired Dynamics.
+FIXED: Only transition states for selected clients, not all clients.
 """
 
 from dataclasses import dataclass
@@ -101,6 +102,7 @@ class AIoTChannel:
         self.successful_transmissions = 0
         
     def _initialize_states(self):
+        """Initialize channel states from steady-state distribution."""
         eigenvals, eigenvecs = np.linalg.eig(self.transition_matrix.T)
         steady = np.real(eigenvecs[:, np.isclose(eigenvals, 1)])
         steady = steady / steady.sum()
@@ -111,6 +113,7 @@ class AIoTChannel:
             self.client_states[cid] = self.rng.choice(states, p=steady)
     
     def _markov_step(self, client_id: int) -> ChannelState:
+        """Perform one Markov transition for a single client."""
         current = self.client_states[client_id]
         state_idx = [ChannelState.GOOD, ChannelState.MEDIUM, ChannelState.BAD].index(current)
         probs = self.transition_matrix[state_idx]
@@ -120,6 +123,7 @@ class AIoTChannel:
         return new_state
     
     def _sample_latency(self, state: ChannelState) -> float:
+        """Sample latency from Pareto distribution."""
         chars = self.characteristics[state]
         pareto_sample = self.rng.pareto(chars.latency_alpha)
         latency = chars.latency_xm * (1 + pareto_sample)
@@ -131,23 +135,32 @@ class AIoTChannel:
         update_size_bytes: int = 1_200_000,
         priority_func: Optional[Callable[[int], int]] = None
     ) -> Tuple[List[TransmissionResult], List[int]]:
+        """
+        Simulate one round of transmissions.
+        FIXED: Only transition states for SELECTED clients.
+        """
+        # FIXED: Only transition states for selected clients, not all clients
         for cid in selected_clients:
             self._markov_step(cid)
         
+        # Priority-based admission
         if priority_func:
             sorted_clients = sorted(selected_clients, key=priority_func, reverse=True)
         else:
             sorted_clients = list(selected_clients)
             self.rng.shuffle(sorted_clients)
         
+        # Admit top K clients
         admitted_clients = sorted_clients[:self.K]
         dropped_by_congestion = set(sorted_clients[self.K:])
         
+        # Simulate transmissions
         results = []
         for cid in admitted_clients:
             result = self._attempt_transmission(cid, update_size_bytes)
             results.append(result)
         
+        # Record congestion drops
         for cid in dropped_by_congestion:
             results.append(TransmissionResult(
                 success=False, client_id=cid, state=self.client_states[cid],
@@ -161,28 +174,33 @@ class AIoTChannel:
         
         successful_cids = [r.client_id for r in results if r.success]
         
+        # Record metrics
         self.round_metrics.append({
             "attempted": len(selected_clients),
             "admitted": len(admitted_clients),
             "successful": len(successful_cids),
             "congestion_drops": len(dropped_by_congestion),
-            "avg_latency_ms": np.mean([r.latency_ms for r in results]),
-            "p95_latency_ms": np.percentile([r.latency_ms for r in results], 95),
+            "avg_latency_ms": np.mean([r.latency_ms for r in results]) if results else 0,
+            "p95_latency_ms": np.percentile([r.latency_ms for r in results], 95) if results else 0,
         })
         
         return results, successful_cids
     
     def _attempt_transmission(self, client_id: int, update_size_bytes: int) -> TransmissionResult:
+        """Attempt transmission for a single client."""
         state = self.client_states[client_id]
         chars = self.characteristics[state]
         
+        # Calculate latency
         base_latency = self._sample_latency(state)
         queue_delay = self.queue_occupancy[client_id] * 10.0
         total_latency = base_latency + queue_delay
         
+        # Calculate transmission time
         bandwidth_bps = chars.bandwidth_mbps * 1_000_000.0
         transmit_time = (update_size_bytes * 8.0) / bandwidth_bps
         
+        # Attempt transmission with retransmissions
         success = True
         bytes_sent = 0
         bytes_lost = 0
@@ -223,6 +241,7 @@ class AIoTChannel:
         )
     
     def get_observable_states(self, client_ids: Optional[List[int]] = None) -> Dict[int, Tuple[ChannelState, float]]:
+        """Get observable channel states for clients."""
         if client_ids is None:
             client_ids = list(range(self.num_clients))
         observable = {}
@@ -234,6 +253,7 @@ class AIoTChannel:
         return observable
     
     def get_channel_statistics(self) -> Dict:
+        """Get channel statistics."""
         if not self.round_metrics:
             return {}
         recent = self.round_metrics[-10:]

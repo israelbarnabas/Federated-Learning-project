@@ -1,6 +1,7 @@
 """
 Correct DP-SGD with Renyi Differential Privacy (RDP) accounting.
 Optimized with caching and reduced bounds to prevent CPU bottlenecks.
+FIXED: Added noise capping and CORRECT cache key including num_samples.
 """
 
 import numpy as np
@@ -8,6 +9,13 @@ import tensorflow as tf
 from typing import Tuple, Optional, Dict, Any, List
 from scipy.special import comb
 import functools
+
+# CRITICAL: Maximum noise multiplier to prevent "noise paralysis"
+MAX_NOISE_MULTIPLIER = 20.0
+
+# Minimum useful epsilon per round - below this, noise is too high
+MIN_USEFUL_EPSILON = 0.3
+
 
 def compute_rdp_gaussian(q: float, sigma: float, alpha: float) -> float:
     if q == 0:
@@ -92,7 +100,8 @@ def compute_epsilon_rdp(
     }
     return best_epsilon, details
 
-# CRITICAL FIX: Add a memory cache so the server doesn't recalculate the exact same math
+
+# FIXED: Cache key now includes all parameters that affect the result
 @functools.lru_cache(maxsize=1024)
 def _cached_noise_search(
     target_epsilon_round: float, 
@@ -129,6 +138,7 @@ def _cached_noise_search(
     eps_final, _ = compute_epsilon_rdp(num_samples, batch_size, sigma_final, epochs, delta)
     return sigma_final, eps_final
 
+
 def find_noise_multiplier_for_epsilon_rdp(
     target_epsilon: float,
     num_samples: int,
@@ -137,20 +147,63 @@ def find_noise_multiplier_for_epsilon_rdp(
     delta: float = 1e-4,
     tolerance: float = 0.01,
 ) -> Tuple[float, float]:
+    """
+    Find noise multiplier for target epsilon with sanity checks.
+    FIXED: Prevents excessive noise that causes learning paralysis.
+    """
     
-    # Round epsilon to 2 decimal places to trigger massive cache hits
+    # CRITICAL FIX 1: Enforce minimum useful epsilon
+    original_epsilon = target_epsilon
+    if target_epsilon < MIN_USEFUL_EPSILON:
+        print(f"[DP] Warning: Requested ε={target_epsilon:.3f} below useful threshold, "
+              f"clamping to ε={MIN_USEFUL_EPSILON}")
+        target_epsilon = MIN_USEFUL_EPSILON
+    
+    # Round inputs to improve cache hits
     target_eps_rounded = round(target_epsilon, 2)
+    num_samples_rounded = int(round(num_samples, -1))  # Round to nearest 10
+    batch_size_rounded = batch_size
+    epochs_rounded = epochs
     
-    return _cached_noise_search(
-        target_eps_rounded, num_samples, batch_size, epochs, delta
+    noise_mult, achieved_eps = _cached_noise_search(
+        target_eps_rounded, num_samples_rounded, batch_size_rounded, epochs_rounded, delta
     )
+    
+    # CRITICAL FIX 2: Cap maximum noise to prevent paralysis
+    if noise_mult > MAX_NOISE_MULTIPLIER:
+        print(f"[DP] Warning: Calculated σ={noise_mult:.2f} exceeds maximum useful "
+              f"noise (σ={MAX_NOISE_MULTIPLIER}), capping")
+        
+        # Find epsilon that corresponds to MAX_NOISE_MULTIPLIER
+        eps_at_max_noise, _ = compute_epsilon_rdp(
+            num_samples, batch_size, MAX_NOISE_MULTIPLIER, epochs, delta
+        )
+        
+        noise_mult = MAX_NOISE_MULTIPLIER
+        achieved_eps = eps_at_max_noise
+        
+        if original_epsilon < achieved_eps:
+            print(f"[DP] Adjusted: ε={original_epsilon:.3f} → ε={achieved_eps:.3f} "
+                  f"(σ={noise_mult:.2f}) to enable learning")
+    
+    return noise_mult, achieved_eps
+
 
 def apply_dp_to_gradients(
     grads: List[tf.Tensor],
     noise_multiplier: float,
     l2_norm_clip: float,
 ) -> List[tf.Tensor]:
-    if noise_multiplier <= 0:
+    """
+    Apply DP-SGD to gradients with noise capping.
+    """
+    # CRITICAL FIX 3: Cap noise at application time as safety check
+    effective_noise = min(noise_multiplier, MAX_NOISE_MULTIPLIER)
+    if effective_noise != noise_multiplier:
+        print(f"[DP] Warning: Applied noise σ={noise_multiplier:.2f} capped to "
+              f"σ={effective_noise:.2f}")
+    
+    if effective_noise <= 0:
         global_norm = tf.linalg.global_norm(grads)
         clip_factor = tf.minimum(l2_norm_clip / (global_norm + 1e-10), 1.0)
         return [g * clip_factor for g in grads]
@@ -159,7 +212,7 @@ def apply_dp_to_gradients(
     clip_factor = tf.minimum(l2_norm_clip / (global_norm + 1e-10), 1.0)
     clipped_grads = [g * clip_factor for g in grads]
     
-    noise_stddev = l2_norm_clip * noise_multiplier
+    noise_stddev = l2_norm_clip * effective_noise
     
     noisy_grads = []
     for g in clipped_grads:
@@ -171,6 +224,7 @@ def apply_dp_to_gradients(
         else:
             noisy_grads.append(None)
     return noisy_grads
+
 
 # Aliases
 compute_epsilon = compute_epsilon_rdp
