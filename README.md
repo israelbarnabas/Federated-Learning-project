@@ -336,5 +336,5 @@ By conditioning privacy spending on delivery likelihood, federated learning can 
 
 ---
 
-**Author:** Israel Barnabas
+**Author:** Israel Barnabas\\
 **Research Area:** Federated Learning • Differential Privacy • Wireless AIoT • Edge Intelligence
